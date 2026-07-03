@@ -1,5 +1,59 @@
 ﻿workflows:
 
+  # ─── SIDELOAD (installable .ipa, no Apple Developer account) ────────────
+  # Produces a REAL unsigned .ipa you can install on your own iPhone for
+  # free using Sideloadly or AltStore (they re-sign it with your free
+  # Apple ID at install time — no $99/year Developer Program needed).
+  # Manual trigger only (Codemagic UI → this workflow → Start new build),
+  # to avoid burning free build minutes on every push.
+  ios-sideload:
+    name: "Autokhidma Wash — iOS Sideload (unsigned, free)"
+    max_build_duration: 60
+    environment:
+      node: "18"
+      xcode: latest
+      cocoapods: default
+      vars:
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+    scripts:
+      - name: Install Node dependencies
+        script: npm install
+      - name: Capacitor sync
+        script: npx cap sync ios
+      - name: Install CocoaPods
+        script: |
+          cd ios/App
+          pod install
+      - name: Archive (unsigned, real device)
+        script: |
+          xcodebuild archive \
+            -workspace "$XCODE_WORKSPACE" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$CM_BUILD_DIR/build/App.xcarchive" \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcpretty
+      - name: Package .ipa
+        script: |
+          cd "$CM_BUILD_DIR/build/App.xcarchive/Products/Applications"
+          mkdir Payload
+          mv App.app Payload/
+          zip -r "$CM_BUILD_DIR/build/AutokhidmaWash.ipa" Payload
+    artifacts:
+      - build/AutokhidmaWash.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      email:
+        recipients:
+          - eld1avolo@gmail.com
+        notify:
+          success: true
+          failure: true
+
   # ─── BUILD SANS SIGNATURE (test compile) ─────────────────────────────────
   # Utilisé pour vérifier que le projet compile sans certificat Apple.
   ios-build-unsigned:
