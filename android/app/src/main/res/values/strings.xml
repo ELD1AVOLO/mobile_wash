@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Autokhidma Wash</string>
+    <string name="title_activity_main">Autokhidma Wash</string>
+    <string name="package_name">ma.autokhidma.wash</string>
+    <string name="custom_url_scheme">ma.autokhidma.wash</string>
+</resources>

@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Native build outputs
+android/app/build/
+android/build/
+android/.gradle/
+android/captures/
+android/.idea/
+android/local.properties
+ios/App/build/
+ios/App/Pods/
+ios/App/output/
+ios/DerivedData/
+
+# Capacitor
+.capacitor/
+
+# Signing (NEVER commit keystores / certs)
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
