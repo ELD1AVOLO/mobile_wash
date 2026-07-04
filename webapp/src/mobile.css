@@ -1,0 +1,333 @@
+/* ============================================================
+   AUTOKHIDMA — Mobile app shell (Wash / Pro / Rent)
+   Faithful port of the Claude Designer mockups. Loaded only on
+   /m/* routes via app/m/layout.tsx. Keyframes are prefixed `m_`
+   to avoid collisions with the website's globals.css.
+   ============================================================ */
+
+.mob {
+  /* motion tokens — Glovo-like spring physics */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --spring: cubic-bezier(0.3, 1.36, 0.44, 1);
+  --spring-soft: cubic-bezier(0.26, 1.14, 0.4, 1);
+  --scr-anim: m_slideInRight;
+  --scr-dur: 0.42s;
+
+  --ink: #0a1735;
+  --ink2: #1b2b54;
+  --muted: #5b6784;
+  --muted2: #8a94ae;
+  --line: #e7eaf2;
+  --line2: #eef1f7;
+  --bg: #f6f7fb;
+  --primary: #1a4ed8;
+  --primary-ink: #0b3d91;
+  --primary-soft: #e8eeff;
+  --accent: #06b6a6;
+  --accent-ink: #0b7a6d;
+  --sky: #7fd4f5;
+  --star: #f5b544;
+  --warn: #e2a93a;
+  --violet: #7c3aed;
+
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Plus Jakarta Sans", -apple-system, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+.mob * {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+.mob ::selection {
+  background: #e8eeff;
+  color: #0b3d91;
+}
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* hidden scrollbars */
+.scrl::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+.scrl {
+  scrollbar-width: none;
+}
+
+/* tap feedback — instant press-down, springy release (Glovo feel) */
+.tap {
+  cursor: pointer;
+  will-change: transform;
+  transition: transform 0.34s var(--spring, cubic-bezier(0.3, 1.36, 0.44, 1)),
+    box-shadow 0.28s, filter 0.2s;
+}
+.tap:active {
+  transform: scale(0.93);
+  filter: brightness(0.96);
+  transition-duration: 0.05s;
+  /* entrance animations (fill-mode both) hold their final transform and
+     would override the press — release the lock while pressed */
+  animation: none !important;
+}
+.mob button:active {
+  animation: none !important;
+}
+
+/* directional screen transitions — go() flips these classes on <body> */
+body.nav-back .mob {
+  --scr-anim: m_slideInLeft;
+}
+body.nav-fade .mob {
+  --scr-anim: m_fadeScale;
+  --scr-dur: 0.3s;
+}
+
+/* Kill the WEBSITE's page-enter animation inside the mobile apps —
+   the app has its own splash; no double entrance. */
+.page-enter:has(.mob) {
+  animation: none !important;
+}
+
+/* Every native <button> is interactive, even without .tap */
+.mob button:not(.tap) {
+  transition: transform 0.3s var(--spring, cubic-bezier(0.3, 1.36, 0.44, 1)), filter 0.2s;
+}
+.mob button:not(.tap):active {
+  transform: scale(0.95);
+  filter: brightness(0.96);
+}
+
+/* Hero service bubbles — extra-juicy squish (they float, so press harder) */
+.mob .bub:active {
+  transform: scale(0.84);
+  filter: brightness(1.06) saturate(1.1);
+  transition-duration: 0.05s;
+}
+.mob .bub:active [data-bub-float] {
+  animation-play-state: paused;
+}
+.mob button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.mob input,
+.mob button {
+  touch-action: manipulation;
+}
+/* smooth momentum scrolling everywhere */
+.scrl {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* safe areas (notch / home indicator) inside native shells */
+.safe-t {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-b {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ---- animations (ported 1:1 from the design, prefixed m_) ---- */
+@keyframes m_popIn {
+  0% { opacity: 0; transform: scale(0.4) translateY(10px); }
+  60% { opacity: 1; transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+@keyframes m_fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes m_scrIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes m_pulseRing {
+  0% { transform: scale(0.7); opacity: 0.7; }
+  80% { opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+@keyframes m_dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+@keyframes m_spin { to { transform: rotate(360deg); } }
+@keyframes m_floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+@keyframes m_drawCheck { to { stroke-dashoffset: 0; } }
+@keyframes m_splashPop {
+  0% { transform: scale(0.6) rotate(-8deg); opacity: 0; }
+  55% { opacity: 1; }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+@keyframes m_sweep {
+  0% { transform: translateX(-130%); }
+  100% { transform: translateX(330%); }
+}
+@keyframes m_scoot {
+  0% { offset-distance: 0%; }
+  100% { offset-distance: 88%; }
+}
+@keyframes m_orb {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(14px, -18px) scale(1.12); }
+}
+@keyframes m_rise {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes m_bubFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes m_shine {
+  0% { transform: translate(-60%, -60%) rotate(0); }
+  100% { transform: translate(-60%, -60%) rotate(360deg); }
+}
+@keyframes m_ringFill { from { stroke-dashoffset: var(--circ); } }
+@keyframes m_carBob {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50% { transform: translateY(-3px) rotate(1deg); }
+}
+@keyframes m_scrub {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  50% { transform: translate(6px, 2px) rotate(11deg); }
+}
+@keyframes m_bubUp {
+  0% { transform: translateY(0) scale(0.5); opacity: 0; }
+  25% { opacity: 0.95; }
+  100% { transform: translateY(-42px) scale(1); opacity: 0; }
+}
+@keyframes m_twinkle {
+  0%, 100% { transform: scale(0); opacity: 0; }
+  50% { transform: scale(1); opacity: 1; }
+}
+@keyframes m_carIdle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2.5px); }
+}
+@keyframes m_dripFall {
+  0% { transform: translateY(0); opacity: 0; }
+  30% { opacity: 1; }
+  100% { transform: translateY(20px); opacity: 0; }
+}
+@keyframes m_confetti {
+  0% { transform: translateY(0) rotate(0); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(-26px) rotate(180deg); opacity: 0; }
+}
+@keyframes m_growBar {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes m_modalIn {
+  from { opacity: 0; transform: translateY(28px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---- Glovo-like navigation & micro-motion ----
+   Forward = the new screen PUSHES in from the right edge (native stack feel).
+   Back = the previous screen slides back in from the left with a fade. */
+@keyframes m_slideInRight {
+  from { transform: translateX(100%); box-shadow: -24px 0 48px rgba(10, 23, 53, 0.25); }
+  to { transform: translateX(0); box-shadow: -24px 0 48px rgba(10, 23, 53, 0); }
+}
+@keyframes m_slideInLeft {
+  from { opacity: 0.5; transform: translateX(-34%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes m_fadeScale {
+  from { opacity: 0; transform: scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes m_sheetUp {
+  0% { transform: translateY(105%); }
+  100% { transform: translateY(0); }
+}
+@keyframes m_tabPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.28) translateY(-2px); }
+  100% { transform: scale(1); }
+}
+@keyframes m_shimmer {
+  0% { background-position: -160% 0; }
+  100% { background-position: 260% 0; }
+}
+/* bubbles riding a wave — rise + tilt like floating on water; the ground
+   shadow shrinks and fades as the bubble lifts (staggered phase = the wave
+   travels across the row, Glovo-style) */
+@keyframes m_wave {
+  0%, 100% { transform: translateY(0) rotate(-4deg); }
+  50% { transform: translateY(-13px) rotate(4deg); }
+}
+@keyframes m_waveShadow {
+  0%, 100% { transform: scaleX(1); opacity: 0.45; }
+  50% { transform: scaleX(0.55); opacity: 0.12; }
+}
+.m-skel {
+  background: linear-gradient(100deg, #eef1f7 38%, #f8fafd 50%, #eef1f7 62%);
+  background-size: 200% 100%;
+  animation: m_shimmer 1.3s ease-in-out infinite;
+  border-radius: 12px;
+}
+
+/* ---- live-tracking Leaflet markers ---- */
+.trk-dest {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #06b6a6;
+  border: 3px solid #fff;
+  box-shadow: 0 3px 8px rgba(10, 23, 53, 0.3);
+}
+.trk-dest::before {
+  content: "";
+  position: absolute;
+  inset: -15px;
+  border-radius: 50%;
+  background: rgba(6, 182, 166, 0.28);
+  animation: m_pulseRing 2s infinite;
+}
+.trk-truck {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid #1a4ed8;
+  box-shadow: 0 6px 16px rgba(11, 61, 145, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  animation: m_carIdle 1.6s ease-in-out infinite;
+}
+.trk-truck img {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+/* NOTE: no prefers-reduced-motion kill-switch here — Windows "animation
+   effects off" (common on PCs/VMs) was silently freezing the whole app.
+   Motion is a core part of this product's design. */
+
+/* ── Standalone launch continuity ─────────────────────────────────────────
+   The native splash draws the same logo ~12% larger; the web splash starts
+   at that scale and springs down into its resting spot. */
+@keyframes m_splashSettle {
+  0%   { transform: scale(1.12); }
+  62%  { transform: scale(0.985); }
+  100% { transform: scale(1); }
+}

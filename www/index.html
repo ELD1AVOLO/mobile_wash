@@ -1,68 +1,33 @@
 <!doctype html>
 <html lang="fr">
   <head>
-    <meta charset="utf-8" />
+    <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="viewport-fit=cover, width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
+    <meta name="theme-color" content="#0A1735" />
     <title>Autokhidma Wash</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <style>
+      /* Pre-hydration backdrop = the splash navy, so there is never a white flash
+         between the native splash and the web splash. */
       html,
       body {
         margin: 0;
-        height: 100%;
-        background: #0a1735;
-        color: #fff;
-        font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-      }
-      .wrap {
-        padding: 24px;
-      }
-      .brand {
-        font-weight: 800;
-        font-size: 22px;
-        letter-spacing: 0.5px;
-      }
-      .brand em {
-        color: #4f8cff;
-        font-style: normal;
-      }
-      .sub {
-        margin-top: 10px;
-        font-size: 14px;
-        opacity: 0.7;
-      }
-      .spinner {
-        margin: 22px auto 0;
-        width: 28px;
-        height: 28px;
-        border: 3px solid rgba(255, 255, 255, 0.18);
-        border-top-color: #4f8cff;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
-        }
+        padding: 0;
+        background: radial-gradient(700px 500px at 50% 18%, #16357f 0%, #0a1735 62%);
       }
     </style>
+    <script type="module" crossorigin src="./assets/index-B42yayAd.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-q58teCcu.css">
   </head>
   <body>
-    <!--
-      This page is only a fallback shown if the deployed app is unreachable
-      (no internet). When SERVER_URL is reachable, Capacitor loads the live
-      web app instead of this file.
-    -->
-    <div class="wrap">
-      <div class="brand">AUTOKHIDMA <em>wash</em></div>
-      <div class="sub">Connexion…</div>
-      <div class="spinner"></div>
-    </div>
+    <div id="root"></div>
   </body>
 </html>

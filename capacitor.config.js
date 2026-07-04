@@ -1,24 +1,18 @@
 /** @type {import('@capacitor/cli').CapacitorConfig} */
 
 /**
- * Autokhidma WASH — native shell config.
- * Converted from .ts to .js to avoid requiring TypeScript on CI.
+ * Autokhidma WASH — standalone native app config.
  *
- * SERVER_URL: points to the deployed Vercel app.
- * The ?native=wash query tells the web app it runs inside the native shell.
+ * The app is fully packed: the UI bundle lives in www/ (built from webapp/
+ * with `npm run build`) and talks straight to Supabase. No server.url —
+ * nothing depends on Vercel or any web deployment.
  */
-
-const SERVER_URL = "https://autokhidma.vercel.app/m/wash?native=wash";
-// LOCAL TEST (same Wi-Fi): const SERVER_URL = "http://192.168.11.107:3000/m/wash?native=wash";
-// EMULATOR:               const SERVER_URL = "http://10.0.2.2:3000/m/wash?native=wash";
 
 const config = {
   appId: "ma.autokhidma.wash",
   appName: "Autokhidma Wash",
   webDir: "www",
   server: {
-    url: SERVER_URL,
-    cleartext: true,
     androidScheme: "https",
   },
   backgroundColor: "#0A1735",
