@@ -18,6 +18,7 @@ function App() {
     supabase
       .from("washers")
       .select("*")
+      .eq("status", "approved")
       .order("is_super", { ascending: false })
       .order("rating", { ascending: false })
       .then(({ data }) => { if (data?.length) setWashers(data as Washer[]); });

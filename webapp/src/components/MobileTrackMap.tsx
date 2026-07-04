@@ -44,14 +44,19 @@ function loadLeaflet(): Promise<any> {
   });
 }
 
-export function MobileTrackMap({ accent = "#1A4ED8", dest }: { accent?: string; dest?: [number, number] }) {
+export function MobileTrackMap({ accent = "#1A4ED8", dest, washerPos }: { accent?: string; dest?: [number, number]; washerPos?: [number, number] }) {
   const mapEl = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
   const washerRef = useRef<any>(null);
+  const lineRef = useRef<any>(null);
+  const liveRef = useRef(false); // becomes true on the first real position
+  const easeRef = useRef(0);
+  const fittedRef = useRef(false);
   const [ready, setReady] = useState(false);
-  // Stable key: `dest` is a fresh array each parent render — compare by value
+  // Stable keys: fresh arrays each parent render — compare by value
   // so the map isn't torn down/rebuilt every render (was crashing the RAF loop).
   const destKey = dest ? `${dest[0]},${dest[1]}` : "";
+  const posKey = washerPos ? `${washerPos[0]},${washerPos[1]}` : "";
 
   useEffect(() => {
     let cancelled = false;
@@ -62,7 +67,7 @@ export function MobileTrackMap({ accent = "#1A4ED8", dest }: { accent?: string; 
         const ROUTE = buildRoute(dest || DEFAULT_DEST);
         const map = L.map(mapEl.current, { zoomControl: false, attributionControl: false, scrollWheelZoom: false });
         L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { subdomains: "abcd", maxZoom: 19 }).addTo(map);
-        L.polyline(ROUTE, { color: accent, weight: 5, opacity: 0.55, dashArray: "2 12", lineCap: "round" }).addTo(map);
+        lineRef.current = L.polyline(ROUTE, { color: accent, weight: 5, opacity: 0.55, dashArray: "2 12", lineCap: "round" }).addTo(map);
 
         const destPt = ROUTE[ROUTE.length - 1];
         L.marker(destPt, { icon: L.divIcon({ className: "", html: `<div class="trk-dest"></div>`, iconSize: [24, 24], iconAnchor: [12, 12] }) }).addTo(map);
@@ -78,17 +83,19 @@ export function MobileTrackMap({ accent = "#1A4ED8", dest }: { accent?: string; 
         setTimeout(() => map.invalidateSize(), 200);
         setTimeout(() => map.invalidateSize(), 600);
 
-        // animate the washer approaching the client (loops)
+        // Demo motion: only until a REAL position arrives (liveRef).
         const dur = 22000;
         const start = performance.now();
         const step = (now: number) => {
-          const t = ((now - start) % dur) / dur;
-          const seg = t * (ROUTE.length - 1);
-          const i = Math.max(0, Math.min(ROUTE.length - 2, Math.floor(seg)));
-          const a = ROUTE[i], b = ROUTE[i + 1];
-          if (a && b && washerRef.current) {
-            const f = seg - i;
-            washerRef.current.setLatLng([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+          if (!liveRef.current) {
+            const t = ((now - start) % dur) / dur;
+            const seg = t * (ROUTE.length - 1);
+            const i = Math.max(0, Math.min(ROUTE.length - 2, Math.floor(seg)));
+            const a = ROUTE[i], b = ROUTE[i + 1];
+            if (a && b && washerRef.current) {
+              const f = seg - i;
+              washerRef.current.setLatLng([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+            }
           }
           raf = requestAnimationFrame(step);
         };
@@ -98,10 +105,38 @@ export function MobileTrackMap({ accent = "#1A4ED8", dest }: { accent?: string; 
     return () => {
       cancelled = true;
       if (raf) cancelAnimationFrame(raf);
+      if (easeRef.current) cancelAnimationFrame(easeRef.current);
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accent, destKey]);
+
+  // LIVE mode: a real washer position (from Supabase) — glide the truck
+  // there and redraw the dashed line washer → destination.
+  useEffect(() => {
+    if (!washerPos || !washerRef.current || !mapRef.current) return;
+    liveRef.current = true;
+    const target: [number, number] = washerPos;
+    const from = washerRef.current.getLatLng();
+    const start = performance.now();
+    const durMs = 1400; // glide between polls so movement looks continuous
+    if (easeRef.current) cancelAnimationFrame(easeRef.current);
+    const ease = (now: number) => {
+      const t = Math.min(1, (now - start) / durMs);
+      const k = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      const lat = from.lat + (target[0] - from.lat) * k;
+      const lng = from.lng + (target[1] - from.lng) * k;
+      washerRef.current.setLatLng([lat, lng]);
+      if (lineRef.current) lineRef.current.setLatLngs([[lat, lng], dest || DEFAULT_DEST]);
+      if (t < 1) easeRef.current = requestAnimationFrame(ease);
+    };
+    easeRef.current = requestAnimationFrame(ease);
+    if (!fittedRef.current) {
+      fittedRef.current = true;
+      try { mapRef.current.fitBounds([target, dest || DEFAULT_DEST], { padding: [80, 80] }); } catch { /* map busy */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posKey]);
 
   return (
     <div ref={mapEl} style={{ position: "absolute", inset: 0, background: "#E9EDF3" }}>

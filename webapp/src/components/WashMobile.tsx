@@ -1,17 +1,21 @@
-
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Washer, Service } from "../lib/types";
 import { supabase } from "../lib/supabase";
+import {
+  useStore, setStore, addBooking, updateBooking, getActiveBooking, initialsOf,
+  type BookingRec, type Address, type Profile,
+} from "../lib/store";
+import { useSession, signIn, signUp, signOut } from "../lib/auth";
 import { MobileMap, type MapWasher } from "./MobileMap";
 import { MobileTrackMap } from "./MobileTrackMap";
 import { LocationPicker, type PickedPos } from "./LocationPicker";
 
 /* ============================================================
-   Autokhidma WASH — mobile app (faithful port of the design).
-   Screens: Splash · Home(Héros) · Map · Marketplace · Booking ·
-   Confirm · Tracking · Account. (Pro landing + Login = next phase.)
-   Wired to live washers/services + /api/bookings, with demo
-   fallback so the design renders when the backend is unreachable.
+   Autokhidma WASH — mobile app (fully functional, standalone).
+   Guest-first: home opens directly, login is optional (real
+   Supabase email auth). Bookings, offers and live tracking all
+   flow through Supabase; profile/addresses/history persist on
+   the device. No dead buttons.
    ============================================================ */
 
 type Screen =
@@ -23,7 +27,7 @@ type WasherLite = Pick<
   Washer,
   "id" | "initials" | "color" | "name" | "rating" | "reviews_count" | "zone" |
   "eta_minutes" | "distance_km" | "base_price" | "available_now" | "bio" | "is_super"
-> & { lat: number | null; lng: number | null };
+> & { lat: number | null; lng: number | null; phone?: string | null };
 
 const DEMO_WASHERS: WasherLite[] = [
   { id: "d1", initials: "YB", color: "#1A4ED8", name: "Youssef B.", rating: 4.9, reviews_count: 214, zone: "Maârif", eta_minutes: 8, distance_km: 1.2, base_price: 60, available_now: true, bio: "Lavage soigné, finitions premium. 3 ans d'expérience.", is_super: true, lat: 33.589, lng: -7.633 },
@@ -42,10 +46,23 @@ const DEMO_FORMULES: Formule[] = [
 
 const SLOTS = ["09:00", "10:30", "12:00", "14:30", "16:00", "18:00"];
 const DOW = ["DIM", "LUN", "MAR", "MER", "JEU", "VEN", "SAM"];
+const SERVICE_FEE = 8;
+const DEFAULT_DEST: [number, number] = [33.5889, -7.6331];
+const SUPPORT_EMAIL = "elmoussaifmail@gmail.com";
+
+const isDemoId = (id: string) => /^d\d$/.test(id);
+
+function haversineKm(a: [number, number], b: [number, number]): number {
+  const R = 6371;
+  const dLat = ((b[0] - a[0]) * Math.PI) / 180;
+  const dLng = ((b[1] - a[1]) * Math.PI) / 180;
+  const la1 = (a[0] * Math.PI) / 180;
+  const la2 = (b[0] * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.sin(dLng / 2) ** 2 * Math.cos(la1) * Math.cos(la2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
 
 // Screen depth → direction of the slide transition (Glovo-like).
-// Deeper = forward (slide from right), shallower = back (slide from left),
-// same depth (tab switch) = quick fade-scale.
 const DEPTH: Record<Screen, number> = {
   splash: 0, home: 1, market: 1, account: 1, tracking: 1,
   map: 2, request: 2, pro: 2, login: 2, booking: 3, offers: 3, confirm: 4,
@@ -53,6 +70,10 @@ const DEPTH: Record<Screen, number> = {
 
 export function WashMobile({ washers, services }: { washers: Washer[]; services: Service[] }) {
   const [screen, setScreen] = useState<Screen>("splash");
+  const store = useStore();
+  const session = useSession();
+  const active = getActiveBooking(store);
+
   const go = (next: Screen) => {
     setScreen((cur) => {
       const d = (DEPTH[next] ?? 1) - (DEPTH[cur] ?? 1);
@@ -77,7 +98,7 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
 
   // inDrive-style request: client proposes a price, washers bid back
   const [proposedPrice, setProposedPrice] = useState<number>(0);
-  const [acceptedPrice, setAcceptedPrice] = useState<number | null>(null);
+  const [requestId, setRequestId] = useState<string | null>(null);
 
   const dates = useMemo(() => {
     const out: { dow: string; day: number; iso: string }[] = [];
@@ -90,7 +111,10 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
   }, []);
 
   const formule = formules.find((f) => f.id === formuleId) ?? formules[0];
-  const total = formule?.price ?? 0;
+  const promoOn = !store.promoUsed; // AUTO20: −20% on the first booking, applied automatically
+  const basePrice = formule?.price ?? 0;
+  const price = promoOn ? Math.round(basePrice * 0.8) : basePrice;
+  const total = price + SERVICE_FEE;
 
   useEffect(() => {
     if (screen !== "splash") return;
@@ -100,52 +124,126 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
 
   const openBooking = (w: WasherLite) => { setSel(w); go("booking"); };
 
-  // Launch an inDrive-style request: navigate instantly, post in the background.
-  function launchRequest(price: number) {
-    setProposedPrice(price);
-    supabase
-      .from("wash_requests")
-      .insert({
-        service_id: formuleId,
-        address: clientPos?.label ?? "Maârif, Casablanca",
-        lat: clientPos?.lat ?? null,
-        lng: clientPos?.lng ?? null,
-        proposed_price: Math.round(price),
-      })
-      .then(() => { /* backend offline — demo offers still flow */ });
-    go("offers");
-  }
+  /* ── live tracking: poll the booked washer's real position ── */
+  const [livePos, setLivePos] = useState<[number, number] | null>(null);
+  const [liveEta, setLiveEta] = useState<number | null>(null);
+  const [liveKm, setLiveKm] = useState<number | null>(null);
+  const [washerPhone, setWasherPhone] = useState<string | null>(null);
+  useEffect(() => {
+    if (screen !== "tracking" || !active || isDemoId(active.washerId)) {
+      setLivePos(null); setLiveEta(null); setLiveKm(null);
+      return;
+    }
+    const dest: [number, number] = active.lat != null && active.lng != null ? [active.lat, active.lng] : DEFAULT_DEST;
+    let stop = false;
+    const tick = async () => {
+      const { data } = await supabase.from("washers").select("lat,lng,phone").eq("id", active.washerId).single();
+      if (stop || !data) return;
+      if (data.phone) setWasherPhone(String(data.phone));
+      if (data.lat != null && data.lng != null) {
+        const pos: [number, number] = [data.lat, data.lng];
+        setLivePos(pos);
+        const km = haversineKm(pos, dest);
+        setLiveKm(km);
+        setLiveEta(Math.max(1, Math.round((km / 18) * 60))); // ~18 km/h city driving
+        if (km < 0.06 && active.status === "confirmed") {
+          updateBooking(active.key, { status: "washing" }); // he arrived → wash starts
+        }
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 2500);
+    return () => { stop = true; clearInterval(iv); };
+  }, [screen, active?.key, active?.washerId, active?.status, active?.lat, active?.lng]);
 
-  function acceptOffer(w: WasherLite, price: number) {
-    setSel(w);
-    setAcceptedPrice(price);
-    go("tracking");
-  }
-
+  /* ── booking: optimistic local record + real Supabase insert ── */
   function confirmBooking() {
-    // optimistic — navigate instantly, post in the background
-    // Skip demo washers (ids "d1".."d5" don't exist in the DB) — demo flow stays visual only.
-    if (sel?.id && !/^d\d$/.test(sel.id)) {
-      const price = formule?.price ?? 0;
-      const SERVICE_FEE = 8;
+    if (!sel) return;
+    const rec: BookingRec = {
+      key: String(Date.now()), id: null,
+      washerId: sel.id, washerName: sel.name, initials: sel.initials, color: sel.color,
+      service: formule?.name ?? "", price, fee: SERVICE_FEE, total,
+      promo: promoOn ? "AUTO20" : null,
+      date: dates[dateIdx]?.iso ?? "", slot,
+      address: clientPos?.label ?? "Casablanca (position à préciser)",
+      lat: clientPos?.lat ?? null, lng: clientPos?.lng ?? null,
+      status: "confirmed", createdAt: new Date().toISOString(),
+    };
+    addBooking(rec);
+    if (!isDemoId(sel.id)) {
       supabase
         .from("bookings")
         .insert({
-          washer_id: sel.id,
-          service_id: formuleId,
-          address: clientPos?.label ?? "Résidence Al Manar, Maârif, Casablanca",
-          lat: clientPos?.lat ?? null,
-          lng: clientPos?.lng ?? null,
-          scheduled_date: dates[dateIdx]?.iso,
-          scheduled_time: slot,
-          price,
-          service_fee: SERVICE_FEE,
-          total: price + SERVICE_FEE,
-          status: "confirmed",
+          user_id: session?.user.id ?? null,
+          washer_id: sel.id, service_id: formuleId,
+          address: rec.address, lat: rec.lat, lng: rec.lng,
+          scheduled_date: rec.date, scheduled_time: slot,
+          price, service_fee: SERVICE_FEE, total,
+          status: "confirmed", notes: promoOn ? "PROMO AUTO20 −20%" : null,
         })
-        .then(() => { /* backend offline — keep the demo flow */ });
+        .select("id").single()
+        .then(({ data }) => { if (data?.id) updateBooking(rec.key, { id: data.id }); });
     }
     go("confirm");
+  }
+
+  /* ── inDrive request: navigate instantly, capture the request id ── */
+  function launchRequest(p: number) {
+    setProposedPrice(p);
+    setRequestId(null);
+    supabase
+      .from("wash_requests")
+      .insert({
+        user_id: session?.user.id ?? null,
+        service_id: formuleId,
+        address: clientPos?.label ?? "Maârif, Casablanca",
+        lat: clientPos?.lat ?? null, lng: clientPos?.lng ?? null,
+        proposed_price: Math.round(p),
+      })
+      .select("id").single()
+      .then(({ data }) => { if (data?.id) setRequestId(data.id); });
+    go("offers");
+  }
+
+  /* ── accepting an offer books it for real ── */
+  function acceptOffer(w: WasherLite, agreed: number) {
+    setSel(w);
+    const now = new Date();
+    const rec: BookingRec = {
+      key: String(Date.now()), id: null,
+      washerId: w.id, washerName: w.name, initials: w.initials, color: w.color,
+      service: formule?.name ?? "", price: agreed, fee: 0, total: agreed, promo: null,
+      date: now.toISOString().slice(0, 10),
+      slot: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+      address: clientPos?.label ?? "Maârif, Casablanca",
+      lat: clientPos?.lat ?? null, lng: clientPos?.lng ?? null,
+      status: "confirmed", createdAt: now.toISOString(),
+    };
+    addBooking(rec);
+    if (!isDemoId(w.id)) {
+      supabase
+        .from("bookings")
+        .insert({
+          user_id: session?.user.id ?? null,
+          washer_id: w.id, service_id: formuleId,
+          address: rec.address, lat: rec.lat, lng: rec.lng,
+          scheduled_date: rec.date, scheduled_time: rec.slot,
+          price: agreed, service_fee: 0, total: agreed,
+          status: "confirmed", notes: `Prix négocié (Commande à ton prix)`,
+        })
+        .select("id").single()
+        .then(({ data }) => { if (data?.id) updateBooking(rec.key, { id: data.id }); });
+    }
+    go("tracking");
+  }
+
+  function finishWash() {
+    if (!active) return;
+    updateBooking(active.key, { status: "done" });
+    if (active.id) {
+      supabase.from("bookings").update({ status: "completed" }).eq("id", active.id).then(() => {});
+    }
+    go("home");
   }
 
   const mapWashers: MapWasher[] = list.map((w) => ({
@@ -153,25 +251,47 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
     zone: w.zone, base_price: w.base_price, available_now: w.available_now, eta_minutes: w.eta_minutes, lat: w.lat, lng: w.lng,
   }));
 
+  const profileName = store.profile.name || (session?.user.user_metadata?.name as string | undefined) || "";
+
   return (
     <>
       {screen === "splash" && <Splash />}
-      {screen === "home" && <HomeHero list={list} go={go} onPick={openBooking} />}
+      {screen === "home" && <HomeHero list={list} go={go} onPick={openBooking} avatarInits={profileName ? initialsOf(profileName) : null} promoOn={promoOn} />}
       {screen === "map" && <MobileMap washers={mapWashers} onBack={() => go("home")} onPick={(mw) => { const w = list.find((x) => x.id === mw.id); if (w) openBooking(w); }} />}
       {screen === "market" && <Market list={list} go={go} onPick={openBooking} />}
       {screen === "booking" && sel && (
-        <Booking sel={sel} formules={formules} formuleId={formuleId} setFormuleId={setFormuleId} dates={dates} dateIdx={dateIdx} setDateIdx={setDateIdx} slot={slot} setSlot={setSlot} total={total} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("market")} onConfirm={confirmBooking} />
+        <Booking sel={sel} formules={formules} formuleId={formuleId} setFormuleId={setFormuleId} dates={dates} dateIdx={dateIdx} setDateIdx={setDateIdx} slot={slot} setSlot={setSlot} price={price} basePrice={basePrice} promoOn={promoOn} total={total} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("market")} onConfirm={confirmBooking} savedAddresses={store.addresses} onPickSaved={(a) => setClientPos({ lat: a.lat, lng: a.lng, label: a.label })} />
       )}
-      {screen === "confirm" && sel && <Confirm sel={sel} formuleName={formule?.name ?? ""} slotLabel={`${dates[dateIdx]?.dow} ${slot}`} total={total} onTrack={() => go("tracking")} onHome={() => go("home")} />}
-      {screen === "tracking" && (sel ? <Tracking sel={sel} formuleName={`${formule?.name ?? ""}${acceptedPrice ? ` · ${acceptedPrice} MAD` : ""}`} dest={clientPos ? [clientPos.lat, clientPos.lng] : undefined} onBack={() => go("home")} /> : <TrackingEmpty go={go} />)}
-      {screen === "account" && <Account sel={sel} go={go} />}
+      {screen === "confirm" && sel && active && <Confirm sel={sel} formuleName={active.service} slotLabel={`${active.date === dates[0]?.iso ? "AUJ" : active.date} ${active.slot}`} total={active.total} promoOn={Boolean(active.promo)} onTrack={() => go("tracking")} onHome={() => go("home")} />}
+      {screen === "tracking" && (active ? (
+        <Tracking
+          booking={active}
+          livePos={livePos}
+          etaMin={liveEta ?? undefined}
+          distKm={liveKm ?? undefined}
+          phone={washerPhone}
+          onDone={finishWash}
+          onBack={() => go("home")}
+        />
+      ) : <TrackingEmpty go={go} />)}
+      {screen === "account" && (
+        <Account
+          go={go}
+          store={store}
+          sessionEmail={session?.user.email ?? null}
+          sessionName={(session?.user.user_metadata?.name as string | undefined) ?? null}
+          isLogged={Boolean(session)}
+          active={active}
+          onLogout={async () => { await signOut(); }}
+        />
+      )}
       {screen === "request" && (
         <RequestWash formules={formules} formuleId={formuleId} setFormuleId={setFormuleId} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("home")} onLaunch={launchRequest} />
       )}
       {screen === "offers" && (
-        <Offers list={list} formule={formule} proposedPrice={proposedPrice} setProposedPrice={setProposedPrice} posLabel={clientPos?.label ?? "Maârif, Casablanca"} onAccept={acceptOffer} onCancel={() => go("home")} />
+        <Offers list={list} formule={formule} requestId={requestId} proposedPrice={proposedPrice} setProposedPrice={setProposedPrice} posLabel={clientPos?.label ?? "Maârif, Casablanca"} onAccept={acceptOffer} onCancel={() => go("home")} />
       )}
-      {screen === "pro" && <ProLanding onBack={() => go("home")} />}
+      {screen === "pro" && <ProLanding onBack={() => go("home")} profile={store.profile} />}
       {screen === "login" && <Login onContinue={() => go("home")} />}
       {pickerOpen && <LocationPicker initial={clientPos} onConfirm={(p) => { setClientPos(p); setPickerOpen(false); }} onCancel={() => setPickerOpen(false)} />}
       {(screen === "home" || screen === "market" || screen === "account") && <BottomTab screen={screen} go={go} />}
@@ -201,7 +321,7 @@ function Splash() {
 }
 
 /* ===================== HOME : HÉROS ===================== */
-function HomeHero({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) => void; onPick: (w: WasherLite) => void }) {
+function HomeHero({ list, go, onPick, avatarInits, promoOn }: { list: WasherLite[]; go: (s: Screen) => void; onPick: (w: WasherLite) => void; avatarInits: string | null; promoOn: boolean }) {
   const available = list.filter((w) => w.available_now).length;
   const liveCount = available || list.length;
   return (
@@ -212,7 +332,11 @@ function HomeHero({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) =>
         <div style={S.heroInner}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
             <div style={{ fontWeight: 800, fontSize: 17, color: "#fff", letterSpacing: "-.01em" }}>AUTOKHIDMA <span style={S.gradWash}>wash</span></div>
-            <div onClick={() => go("account")} className="tap" style={S.avatarSm}>YB</div>
+            <div onClick={() => go("account")} className="tap" style={S.avatarSm}>
+              {avatarInits ?? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4" /><path d="M5 21c0-4 3.5-6 7-6s7 2 7 6" /></svg>
+              )}
+            </div>
           </div>
           <div style={S.liveBadge}><span style={S.liveDotWrap}><span style={S.liveDot} /></span><span style={{ color: "#fff", fontSize: 11.5, fontWeight: 600 }}>{liveCount} laveurs disponibles</span></div>
           <div style={S.heroTitle}>Ta voiture brille,<br /><span style={S.gradWash}>sans bouger</span> de chez toi.</div>
@@ -243,9 +367,9 @@ function HomeHero({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) =>
 
         <div onClick={() => go("market")} className="tap" style={{ ...S.promo, marginTop: 14 }}>
           <div style={S.promoBlob} />
-          <div className="mono" style={S.promoCode}>CODE AUTO20</div>
+          <div className="mono" style={S.promoCode}>{promoOn ? "CODE AUTO20 · ACTIF" : "CODE AUTO20 · UTILISÉ ✓"}</div>
           <div style={S.promoTitle}>−20% sur ton 1<sup>er</sup> lavage</div>
-          <div style={{ position: "relative", fontSize: 13, opacity: 0.85, marginTop: 2 }}>Treat yourself, on s&apos;occupe du reste.</div>
+          <div style={{ position: "relative", fontSize: 13, opacity: 0.85, marginTop: 2 }}>{promoOn ? "Appliqué automatiquement à ta 1re réservation." : "Déjà profité — merci ! D'autres offres arrivent."}</div>
         </div>
         <div style={{ ...S.h2, margin: "22px 0 12px" }}>Nos laveurs vérifiés</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
@@ -259,8 +383,16 @@ function HomeHero({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) =>
 /* ===================== MARKETPLACE ===================== */
 function Market({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) => void; onPick: (w: WasherLite) => void }) {
   const [filter, setFilter] = useState("Tous");
-  const chips = ["Tous", "Express", "Standard", "Premium", "★ Top notés"];
-  const shown = filter === "★ Top notés" ? [...list].sort((a, b) => b.rating - a.rating) : list;
+  const [q, setQ] = useState("");
+  const chips = ["Tous", "Dispo maintenant", "★ Top notés", "Prix bas"];
+  let shown = [...list];
+  if (filter === "★ Top notés") shown.sort((a, b) => b.rating - a.rating);
+  if (filter === "Prix bas") shown.sort((a, b) => a.base_price - b.base_price);
+  if (filter === "Dispo maintenant") shown = shown.filter((w) => w.available_now);
+  if (q.trim()) {
+    const needle = q.trim().toLowerCase();
+    shown = shown.filter((w) => w.name.toLowerCase().includes(needle) || w.zone.toLowerCase().includes(needle));
+  }
   return (
     <div className="scrl" style={S.scr}>
       <div style={S.marketHead}>
@@ -268,7 +400,11 @@ function Market({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) => v
           <BackBtn onClick={() => go("home")} />
           <div><div style={{ fontWeight: 800, fontSize: 19, color: "#0A1735", letterSpacing: "-.02em" }}>Réserve ton lavage</div><div style={{ fontSize: 12, color: "#5B6784" }}>Compare {list.length} laveurs vérifiés</div></div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, background: "#F6F7FB", border: "1px solid #E7EAF2", borderRadius: 14, padding: "11px 14px" }}><Search size={17} stroke="#8A94AE" /><span style={{ color: "#8A94AE", fontSize: 13.5 }}>Laveur, quartier…</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, background: "#F6F7FB", border: "1px solid #E7EAF2", borderRadius: 14, padding: "11px 14px" }}>
+          <Search size={17} stroke="#8A94AE" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Laveur, quartier…" style={{ flex: 1, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: "#0A1735" }} />
+          {q && <span onClick={() => setQ("")} className="tap" style={{ color: "#8A94AE", fontWeight: 700, fontSize: 15 }}>✕</span>}
+        </div>
         <div className="scrl" style={{ display: "flex", gap: 8, overflowX: "auto", margin: "13px -18px 0", padding: "0 18px" }}>
           {chips.map((c) => (
             <span key={c} onClick={() => setFilter(c)} className="tap" style={{ flex: "none", background: filter === c ? "#0B3D91" : "#fff", color: filter === c ? "#fff" : "#1B2B54", border: filter === c ? "none" : "1px solid #E7EAF2", fontSize: 12, fontWeight: 700, padding: "8px 14px", borderRadius: 999 }}>{c}</span>
@@ -276,13 +412,11 @@ function Market({ list, go, onPick }: { list: WasherLite[]; go: (s: Screen) => v
         </div>
       </div>
       <div style={{ padding: "16px 18px 0" }}>
-        <div className="scrl" style={{ display: "flex", gap: 11, overflowX: "auto", margin: "0 -18px 18px", padding: "0 18px" }}>
-          <div style={{ flex: "none", width: 200, background: "linear-gradient(120deg,#1A4ED8,#06B6A6)", borderRadius: 16, padding: 15, color: "#fff" }}><div style={{ fontWeight: 800, fontSize: 15 }}>−20% 1er lavage</div><div style={{ fontSize: 11.5, opacity: 0.85, marginTop: 3 }}>Code AUTO20</div></div>
-          <div style={{ flex: "none", width: 200, background: "#0A1735", borderRadius: 16, padding: 15, color: "#fff" }}><div style={{ fontWeight: 800, fontSize: 15 }}>Parrainage</div><div style={{ fontSize: 11.5, opacity: 0.7, marginTop: 3 }}>50 MAD offerts</div></div>
-          <div style={{ flex: "none", width: 200, background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 15 }}><div style={{ fontWeight: 800, fontSize: 15, color: "#0A1735" }}>Abonnement</div><div style={{ fontSize: 11.5, color: "#5B6784", marginTop: 3 }}>4 lavages = 1 offert</div></div>
-        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
           {shown.map((w, i) => <MarketCard key={w.id} w={w} i={i} onClick={() => onPick(w)} />)}
+          {!shown.length && (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#8A94AE", fontSize: 13.5, fontWeight: 600 }}>Aucun laveur ne correspond — essaie un autre filtre.</div>
+          )}
         </div>
       </div>
     </div>
@@ -313,14 +447,16 @@ function MarketCard({ w, onClick, i = 0 }: { w: WasherLite; onClick: () => void;
 }
 
 /* ===================== BOOKING ===================== */
-function Booking({ sel, formules, formuleId, setFormuleId, dates, dateIdx, setDateIdx, slot, setSlot, total, clientPos, onPickLocation, onBack, onConfirm }: {
+function Booking({ sel, formules, formuleId, setFormuleId, dates, dateIdx, setDateIdx, slot, setSlot, price, basePrice, promoOn, total, clientPos, onPickLocation, onBack, onConfirm, savedAddresses, onPickSaved }: {
   sel: WasherLite; formules: Formule[]; formuleId: string; setFormuleId: (s: string) => void;
   dates: { dow: string; day: number; iso: string }[]; dateIdx: number; setDateIdx: (i: number) => void;
-  slot: string; setSlot: (s: string) => void; total: number; clientPos: PickedPos | null; onPickLocation: () => void; onBack: () => void; onConfirm: () => void;
+  slot: string; setSlot: (s: string) => void; price: number; basePrice: number; promoOn: boolean; total: number;
+  clientPos: PickedPos | null; onPickLocation: () => void; onBack: () => void; onConfirm: () => void;
+  savedAddresses: Address[]; onPickSaved: (a: Address) => void;
 }) {
   return (
     <>
-      <div className="scrl" style={{ ...S.scr, paddingBottom: 110 }}>
+      <div className="scrl" style={{ ...S.scr, paddingBottom: 130 }}>
         <div style={{ ...S.marketHead, display: "flex", alignItems: "center", gap: 12 }}>
           <BackBtn onClick={onBack} />
           <div><div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>Réservation</div><div style={{ fontSize: 12, color: "#5B6784" }}>Avec {sel.name}</div></div>
@@ -368,14 +504,27 @@ function Booking({ sel, formules, formuleId, setFormuleId, dates, dateIdx, setDa
           </div>
 
           <div style={S.bookH}>Adresse &amp; paiement</div>
+          {savedAddresses.length > 0 && (
+            <div className="scrl" style={{ display: "flex", gap: 8, overflowX: "auto", margin: "0 -18px 10px", padding: "0 18px" }}>
+              {savedAddresses.map((a) => (
+                <span key={a.name + a.label} onClick={() => onPickSaved(a)} className="tap" style={{ flex: "none", background: clientPos?.label === a.label ? "#E8EEFF" : "#fff", border: `1.5px solid ${clientPos?.label === a.label ? "#1A4ED8" : "#E7EAF2"}`, color: "#0B3D91", fontSize: 12, fontWeight: 700, padding: "8px 13px", borderRadius: 999 }}>{a.name === "Domicile" ? "🏠" : a.name === "Bureau" ? "🏢" : "📍"} {a.name}</span>
+              ))}
+            </div>
+          )}
           <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
             <div onClick={onPickLocation} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: clientPos ? "#E6FAF6" : "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><Pin size={18} stroke={clientPos ? "#046B62" : "#0B3D91"} /></div><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 13.5, color: "#0A1735", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{clientPos ? clientPos.label : "Choisir ma position"}</div><div style={{ fontSize: 11.5, color: clientPos ? "#046B62" : "#5B6784" }}>{clientPos ? "Position confirmée sur la carte ✓" : "GPS ou point sur la carte"}</div></div><span style={{ color: "#8A94AE" }}>›</span></div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>💳</div><div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13.5, color: "#0A1735" }}>Carte ·· 4291</div><div style={{ fontSize: 11.5, color: "#5B6784" }}>ou espèces à la fin</div></div><span style={{ color: "#8A94AE" }}>›</span></div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>💵</div><div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13.5, color: "#0A1735" }}>Espèces à la fin du lavage</div><div style={{ fontSize: 11.5, color: "#5B6784" }}>Paiement carte bientôt disponible</div></div><Check size={16} stroke="#06B6A6" sw={3} /></div>
           </div>
         </div>
       </div>
       <div style={S.cta}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}><span style={{ fontSize: 13, color: "#5B6784", fontWeight: 600 }}>Total estimé</span><span className="mono" style={{ fontSize: 18, fontWeight: 500, color: "#0A1735" }}>{total} MAD</span></div>
+        {promoOn && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 7 }}>
+            <span style={{ fontSize: 12, color: "#046B62", fontWeight: 700 }}>🎁 Code AUTO20 appliqué (−20%)</span>
+            <span className="mono" style={{ fontSize: 12, color: "#8A94AE", textDecoration: "line-through" }}>{basePrice + SERVICE_FEE} MAD</span>
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}><span style={{ fontSize: 13, color: "#5B6784", fontWeight: 600 }}>Total ({price} + {SERVICE_FEE} MAD service)</span><span className="mono" style={{ fontSize: 18, fontWeight: 500, color: "#0A1735" }}>{total} MAD</span></div>
         <button onClick={onConfirm} className="tap" style={S.ctaBtn}>Confirmer la réservation</button>
       </div>
     </>
@@ -383,7 +532,7 @@ function Booking({ sel, formules, formuleId, setFormuleId, dates, dateIdx, setDa
 }
 
 /* ===================== CONFIRM ===================== */
-function Confirm({ sel, formuleName, slotLabel, total, onTrack, onHome }: { sel: WasherLite; formuleName: string; slotLabel: string; total: number; onTrack: () => void; onHome: () => void }) {
+function Confirm({ sel, formuleName, slotLabel, total, promoOn, onTrack, onHome }: { sel: WasherLite; formuleName: string; slotLabel: string; total: number; promoOn: boolean; onTrack: () => void; onHome: () => void }) {
   return (
     <div style={S.confirm}>
       <div style={{ position: "absolute", top: "10%", left: -40, width: 160, height: 160, borderRadius: "50%", background: "radial-gradient(circle,rgba(6,182,166,.4),transparent 70%)", filter: "blur(16px)", animation: "m_orb 8s ease-in-out infinite" }} />
@@ -400,6 +549,7 @@ function Confirm({ sel, formuleName, slotLabel, total, onTrack, onHome }: { sel:
       <div style={{ width: "100%", maxWidth: 320, background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 18, padding: 16, marginTop: 24, animation: "m_fadeUp .6s .42s both" }}>
         <Recap k="Formule" v={formuleName} />
         <Recap k="Créneau" v={slotLabel} top />
+        {promoOn && <Recap k="Promo" v="AUTO20 · −20% ✓" top />}
         <Recap k="Total" v={`${total} MAD`} top accent />
       </div>
       <button onClick={onTrack} className="tap" style={{ width: "100%", maxWidth: 320, marginTop: 22, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 15, borderRadius: 15, animation: "m_fadeUp .6s .5s both" }}>Suivre mon laveur en direct →</button>
@@ -416,36 +566,56 @@ function Recap({ k, v, top, accent }: { k: string; v: string; top?: boolean; acc
   );
 }
 
-/* ===================== TRACKING ===================== */
-function Tracking({ sel, formuleName, dest, onBack }: { sel: WasherLite; formuleName: string; dest?: [number, number]; onBack: () => void }) {
+/* ===================== TRACKING (live positions from Supabase) ===================== */
+function Tracking({ booking, livePos, etaMin, distKm, phone, onDone, onBack }: {
+  booking: BookingRec; livePos: [number, number] | null; etaMin?: number; distKm?: number;
+  phone: string | null; onDone: () => void; onBack: () => void;
+}) {
+  const dest: [number, number] = booking.lat != null && booking.lng != null ? [booking.lat, booking.lng] : DEFAULT_DEST;
+  const washing = booking.status === "washing";
+  const eta = etaMin ?? 8;
+  const km = distKm != null ? (distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(1)} km`) : null;
+  const waLink = phone ? `https://wa.me/${phone.replace(/[^0-9]/g, "")}` : null;
   return (
     <div style={{ position: "relative", width: "100vw", height: "100dvh", overflow: "hidden", background: "#E9EDF3" }}>
-      <MobileTrackMap accent="#1A4ED8" dest={dest} />
+      <MobileTrackMap accent="#1A4ED8" dest={dest} washerPos={livePos ?? undefined} />
       <button onClick={onBack} className="tap" style={{ position: "absolute", top: "calc(env(safe-area-inset-top,0px) + 12px)", left: 14, zIndex: 10, ...mapBtn }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0A1735" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6" /></svg></button>
-      <div style={{ position: "absolute", top: "calc(env(safe-area-inset-top,0px) + 12px)", right: 14, zIndex: 10, display: "flex", alignItems: "center", gap: 7, background: "#fff", padding: "9px 13px", borderRadius: 14, boxShadow: "0 6px 18px rgba(10,23,53,.16)" }}><span style={S.liveDotWrap}><span style={S.liveDot} /></span><span style={{ fontSize: 12.5, fontWeight: 700, color: "#0A1735" }}>En route</span></div>
+      <div style={{ position: "absolute", top: "calc(env(safe-area-inset-top,0px) + 12px)", right: 14, zIndex: 10, display: "flex", alignItems: "center", gap: 7, background: "#fff", padding: "9px 13px", borderRadius: 14, boxShadow: "0 6px 18px rgba(10,23,53,.16)" }}><span style={S.liveDotWrap}><span style={S.liveDot} /></span><span style={{ fontSize: 12.5, fontWeight: 700, color: "#0A1735" }}>{washing ? "Lavage en cours" : livePos ? "En route · position live" : "En route"}</span></div>
 
       <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 9, background: "#fff", borderRadius: "26px 26px 0 0", boxShadow: "0 -8px 28px rgba(10,23,53,.12)", padding: "12px 0 calc(env(safe-area-inset-bottom,0px) + 18px)", animation: "m_rise .55s var(--spring, cubic-bezier(.3,1.36,.44,1)) both" }}>
         <div style={{ width: 40, height: 4, background: "#E7EAF2", borderRadius: 999, margin: "2px auto 14px" }} />
         <div style={{ padding: "0 20px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
             <div style={{ position: "relative", width: 88, height: 88, flex: "none" }}>
-              <svg width="88" height="88" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" fill="none" stroke="#EEF1F7" strokeWidth={11} /><circle cx="60" cy="60" r="52" fill="none" stroke="#06B6A6" strokeWidth={11} strokeLinecap="round" strokeDasharray="326.7" strokeDashoffset="118" transform="rotate(-90 60 60)" style={{ "--circ": "326.7", animation: "m_ringFill 1.4s cubic-bezier(.22,1,.36,1) both" } as CSSProperties} /></svg>
-              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 24, fontWeight: 800, color: "#0A1735", lineHeight: 1 }}>{sel.eta_minutes}</span><span style={{ fontSize: 10, color: "#5B6784", fontWeight: 700 }}>min</span></div>
+              <svg width="88" height="88" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" fill="none" stroke="#EEF1F7" strokeWidth={11} /><circle cx="60" cy="60" r="52" fill="none" stroke="#06B6A6" strokeWidth={11} strokeLinecap="round" strokeDasharray="326.7" strokeDashoffset={washing ? 20 : 118} transform="rotate(-90 60 60)" style={{ "--circ": "326.7", animation: "m_ringFill 1.4s cubic-bezier(.22,1,.36,1) both" } as CSSProperties} /></svg>
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>{washing ? <span style={{ fontSize: 26 }}>🧽</span> : (<><span style={{ fontSize: 24, fontWeight: 800, color: "#0A1735", lineHeight: 1 }}>{eta}</span><span style={{ fontSize: 10, color: "#5B6784", fontWeight: 700 }}>min</span></>)}</div>
             </div>
-            <div style={{ flex: 1 }}><div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", letterSpacing: "-.02em" }}>Ton laveur arrive</div><div style={{ fontSize: 13, color: "#5B6784", marginTop: 3 }}>{sel.name} est à {sel.distance_km} km. Prépare ta voiture 🚗</div></div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", letterSpacing: "-.02em" }}>{washing ? "Lavage en cours ✨" : "Ton laveur arrive"}</div>
+              <div style={{ fontSize: 13, color: "#5B6784", marginTop: 3 }}>
+                {washing ? `${booking.washerName} s'occupe de ta voiture.` : km ? `${booking.washerName} est à ${km}. Prépare ta voiture 🚗` : `${booking.washerName} est en route. Prépare ta voiture 🚗`}
+              </div>
+            </div>
           </div>
           <div style={{ display: "flex", alignItems: "flex-start", margin: "18px 0 4px" }}>
             <TLStep label="Accepté" done first />
-            <TLStep label="En route" active />
-            <TLStep label="Lavage" />
+            <TLStep label="En route" done={washing} active={!washing} />
+            <TLStep label="Lavage" active={washing} />
             <TLStep label="Terminé" last />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12, background: "#F6F7FB", border: "1px solid #EEF1F7", borderRadius: 16, padding: 12, marginTop: 14 }}>
-            <div style={{ width: 46, height: 46, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 15, flex: "none", background: sel.color }}>{sel.initials}</div>
-            <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{sel.name}</div><div style={{ fontSize: 12, color: "#5B6784" }}>★ {sel.rating} · {formuleName}</div></div>
-            <button className="tap" style={{ width: 42, height: 42, borderRadius: 13, background: "#fff", border: "1px solid #E7EAF2", display: "flex", alignItems: "center", justifyContent: "center" }}><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#0B3D91" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M8 10a8 8 0 0 0 6 6l2-2 4 1v4a17 17 0 0 1-15-15h4l1 4-2 2Z" /></svg></button>
-            <button className="tap" style={{ width: 42, height: 42, borderRadius: 13, background: "#0B3D91", border: "none", display: "flex", alignItems: "center", justifyContent: "center" }}><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8 8 0 0 1-11 7.3L3 21l1.7-6A8 8 0 1 1 21 11.5Z" /></svg></button>
+            <div style={{ width: 46, height: 46, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 15, flex: "none", background: booking.color }}>{booking.initials}</div>
+            <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{booking.washerName}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{booking.service} · {booking.total} MAD</div></div>
+            {phone && (
+              <>
+                <button onClick={() => { window.open(`tel:${phone}`, "_self"); }} className="tap" style={{ width: 42, height: 42, borderRadius: 13, background: "#fff", border: "1px solid #E7EAF2", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label="Appeler"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#0B3D91" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M8 10a8 8 0 0 0 6 6l2-2 4 1v4a17 17 0 0 1-15-15h4l1 4-2 2Z" /></svg></button>
+                {waLink && <button onClick={() => { window.open(waLink, "_blank"); }} className="tap" style={{ width: 42, height: 42, borderRadius: 13, background: "#0B3D91", border: "none", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label="WhatsApp"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8 8 0 0 1-11 7.3L3 21l1.7-6A8 8 0 1 1 21 11.5Z" /></svg></button>}
+              </>
+            )}
           </div>
+          {washing && (
+            <button onClick={onDone} className="tap" style={{ width: "100%", marginTop: 12, border: "none", background: "linear-gradient(120deg,#06B6A6,#0B7A6D)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 14.5, padding: 14, borderRadius: 14 }}>Lavage terminé ✓ (confirmer)</button>
+          )}
         </div>
       </div>
     </div>
@@ -462,8 +632,31 @@ function TLStep({ label, done, active, first, last }: { label: string; done?: bo
   );
 }
 
-/* ===================== ACCOUNT ===================== */
-function Account({ sel, go }: { sel: WasherLite | null; go: (s: Screen) => void }) {
+function TrackingEmpty({ go }: { go: (s: Screen) => void }) {
+  return (
+    <div style={{ position: "relative", width: "100vw", height: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, background: "#F6F7FB", textAlign: "center" }}>
+      <div style={{ width: 84, height: 84, borderRadius: 24, background: "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38 }}>🚿</div>
+      <div style={{ fontWeight: 800, fontSize: 20, color: "#0A1735", marginTop: 18 }}>Aucun lavage en cours</div>
+      <div style={{ fontSize: 13.5, color: "#5B6784", marginTop: 6, maxWidth: 260 }}>Réserve un laveur et tu pourras suivre son arrivée en direct ici.</div>
+      <button onClick={() => go("market")} className="tap" style={{ marginTop: 22, border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 15, padding: "14px 24px", borderRadius: 14, boxShadow: "0 10px 24px rgba(11,61,145,.3)" }}>Réserver un laveur</button>
+      <button onClick={() => go("home")} className="tap" style={{ marginTop: 12, background: "none", border: "none", color: "#5B6784", fontFamily: "inherit", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Retour à l&apos;accueil</button>
+    </div>
+  );
+}
+
+/* ===================== ACCOUNT (all real) ===================== */
+function Account({ go, store, sessionEmail, sessionName, isLogged, active, onLogout }: {
+  go: (s: Screen) => void; store: ReturnType<typeof useStore>;
+  sessionEmail: string | null; sessionName: string | null; isLogged: boolean;
+  active: BookingRec | null; onLogout: () => Promise<void>;
+}) {
+  const [detail, setDetail] = useState<string | null>(null);
+  const name = store.profile.name || sessionName || "";
+  const displayName = name || "Invité";
+  const inits = name ? initialsOf(name) : "🙂";
+  const doneCount = store.history.filter((h) => h.status === "done").length;
+  const spent = store.history.filter((h) => h.status === "done").reduce((s, h) => s + h.total, 0);
+  const statut = doneCount >= 8 ? "Gold" : doneCount >= 4 ? "Silver" : "Bronze";
   const menu = [
     { icon: "🧾", label: "Mes lavages", bg: "#E8EEFF" },
     { icon: "📍", label: "Mes adresses", bg: "#E6FAF6" },
@@ -472,41 +665,52 @@ function Account({ sel, go }: { sel: WasherLite | null; go: (s: Screen) => void 
     { icon: "🔔", label: "Notifications", bg: "#E8EEFF" },
     { icon: "⚙️", label: "Paramètres", bg: "#EEF1F7" },
   ];
-  const [detail, setDetail] = useState<string | null>(null);
-  const [profile, setProfile] = useState({ name: "Yassine B.", phone: "+212 6 12 34 56 78", email: "", city: "Casablanca" });
-  const inits = profile.name.trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "YB";
   return (
     <>
-    <div className="scrl" style={S.scr}>
-      <div style={{ background: "radial-gradient(500px 320px at 80% 0%,#1B3E8F,#0A1735 70%)", borderRadius: "0 0 28px 28px", padding: "calc(env(safe-area-inset-top,0px) + 30px) 20px 24px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 62, height: 62, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 22, flex: "none" }}>{inits}</div>
-          <div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 800, fontSize: 19 }}>{profile.name}</div><div style={{ color: "rgba(255,255,255,.6)", fontSize: 13 }}>{profile.phone}</div></div>
-          <span onClick={() => setDetail("edit-profile")} className="tap" style={{ color: "#fff", fontSize: 11, fontWeight: 700, background: "rgba(255,255,255,.15)", padding: "5px 10px", borderRadius: 999, cursor: "pointer" }}>Modifier</span>
+      <div className="scrl" style={S.scr}>
+        <div style={{ background: "radial-gradient(500px 320px at 80% 0%,#1B3E8F,#0A1735 70%)", borderRadius: "0 0 28px 28px", padding: "calc(env(safe-area-inset-top,0px) + 30px) 20px 24px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ width: 62, height: 62, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 22, flex: "none" }}>{inits}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ color: "#fff", fontWeight: 800, fontSize: 19 }}>{displayName}</div>
+              <div style={{ color: "rgba(255,255,255,.6)", fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{store.profile.phone || sessionEmail || "Complète ton profil"}</div>
+            </div>
+            <span onClick={() => setDetail("edit-profile")} className="tap" style={{ color: "#fff", fontSize: 11, fontWeight: 700, background: "rgba(255,255,255,.15)", padding: "5px 10px", borderRadius: 999, cursor: "pointer" }}>Modifier</span>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+            <Stat v={String(doneCount)} l="lavages" c="#7FD4F5" />
+            <Stat v={String(spent)} l="MAD dépensés" c="#fff" mono />
+            <Stat v={statut} l="statut" c="#F5B544" />
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-          <Stat v="12" l="lavages" c="#7FD4F5" />
-          <Stat v="120" l="MAD crédit" c="#fff" mono />
-          <Stat v="Gold" l="statut" c="#F5B544" />
+        <div style={{ padding: "18px 18px 0" }}>
+          {active && (
+            <div onClick={() => go("tracking")} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", borderRadius: 18, padding: 15, boxShadow: "0 10px 24px rgba(11,61,145,.28)", marginBottom: 18 }}>
+              <div style={{ width: 42, height: 42, borderRadius: "50%", background: "rgba(255,255,255,.18)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><span style={S.liveDotWrap}><span style={{ ...S.liveDot, background: "#7FD4F5" }} /></span></div>
+              <div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Lavage en cours</div><div style={{ color: "rgba(255,255,255,.7)", fontSize: 12 }}>{active.washerName} · {active.service} · {active.slot}</div></div>
+              <span style={{ color: "#fff", fontSize: 20 }}>›</span>
+            </div>
+          )}
+          <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 18, overflow: "hidden" }}>
+            {menu.map((m, i) => (
+              <div key={m.label} onClick={() => setDetail(m.label)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, padding: 15, borderBottom: i < menu.length - 1 ? "1px solid #EEF1F7" : "none" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>{m.icon}</div><span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{m.label}</span><span style={{ color: "#C2CADB", fontSize: 18 }}>›</span></div>
+            ))}
+          </div>
+          <div onClick={() => go("pro")} className="tap" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 13, background: "#0A1735", borderRadius: 18, padding: 16 }}><div style={{ width: 42, height: 42, borderRadius: 12, background: "rgba(127,212,245,.16)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 20 }}>💼</div><div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Devenir laveur partenaire</div><div style={{ color: "rgba(255,255,255,.6)", fontSize: 12 }}>Gagne jusqu&apos;à 6 000 MAD/mois</div></div><span style={{ color: "#7FD4F5", fontSize: 20 }}>›</span></div>
+          {isLogged ? (
+            <button onClick={() => { onLogout(); }} className="tap" style={{ width: "100%", marginTop: 14, background: "#fff", border: "1px solid #F3D2D2", color: "#D14343", fontFamily: "inherit", fontWeight: 700, fontSize: 14, padding: 14, borderRadius: 15 }}>Se déconnecter</button>
+          ) : (
+            <button onClick={() => go("login")} className="tap" style={{ width: "100%", marginTop: 14, background: "#fff", border: "1.5px solid #1A4ED8", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 14, padding: 14, borderRadius: 15 }}>Se connecter ou créer un compte</button>
+          )}
         </div>
       </div>
-      <div style={{ padding: "18px 18px 0" }}>
-        <div onClick={() => go("tracking")} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", borderRadius: 18, padding: 15, boxShadow: "0 10px 24px rgba(11,61,145,.28)", marginBottom: 18 }}>
-          <div style={{ width: 42, height: 42, borderRadius: "50%", background: "rgba(255,255,255,.18)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><span style={S.liveDotWrap}><span style={{ ...S.liveDot, background: "#7FD4F5" }} /></span></div>
-          <div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Lavage en cours</div><div style={{ color: "rgba(255,255,255,.7)", fontSize: 12 }}>{sel?.name ?? "Youssef B."} · arrive dans 8 min</div></div>
-          <span style={{ color: "#fff", fontSize: 20 }}>›</span>
-        </div>
-        <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 18, overflow: "hidden" }}>
-          {menu.map((m, i) => (
-            <div key={m.label} onClick={() => setDetail(m.label)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, padding: 15, borderBottom: i < menu.length - 1 ? "1px solid #EEF1F7" : "none" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>{m.icon}</div><span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{m.label}</span><span style={{ color: "#C2CADB", fontSize: 18 }}>›</span></div>
-          ))}
-        </div>
-        <div onClick={() => go("pro")} className="tap" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 13, background: "#0A1735", borderRadius: 18, padding: 16 }}><div style={{ width: 42, height: 42, borderRadius: 12, background: "rgba(127,212,245,.16)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 20 }}>💼</div><div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Passer en Espace Pro</div><div style={{ color: "rgba(255,255,255,.6)", fontSize: 12 }}>Gère tes lavages &amp; gains</div></div><span style={{ color: "#7FD4F5", fontSize: 20 }}>›</span></div>
-        <button onClick={() => go("login")} className="tap" style={{ width: "100%", marginTop: 14, background: "#fff", border: "1px solid #F3D2D2", color: "#D14343", fontFamily: "inherit", fontWeight: 700, fontSize: 14, padding: 14, borderRadius: 15 }}>Se déconnecter</button>
-      </div>
-    </div>
-    {detail === "edit-profile" && <EditProfile profile={profile} onSave={(p) => { setProfile(p); setDetail(null); }} onBack={() => setDetail(null)} />}
-    {detail && detail !== "edit-profile" && <AccountDetail label={detail} onBack={() => setDetail(null)} />}
+      {detail === "edit-profile" && <EditProfile profile={{ ...store.profile, name, email: store.profile.email || sessionEmail || "" }} isLogged={isLogged} onSave={(p) => { setStore({ profile: p }); if (isLogged) supabase.auth.updateUser({ data: { name: p.name } }).then(() => {}); setDetail(null); }} onBack={() => setDetail(null)} />}
+      {detail === "Mes lavages" && <WashHistory history={store.history} onBack={() => setDetail(null)} />}
+      {detail === "Mes adresses" && <Addresses onBack={() => setDetail(null)} />}
+      {detail === "Paiement" && <Payment onBack={() => setDetail(null)} />}
+      {detail === "Parrainage & crédits" && <Referral name={name} onBack={() => setDetail(null)} />}
+      {detail === "Notifications" && <Notifs onBack={() => setDetail(null)} />}
+      {detail === "Paramètres" && <Settings onBack={() => setDetail(null)} />}
     </>
   );
 }
@@ -519,40 +723,212 @@ function Stat({ v, l, c, mono }: { v: string; l: string; c: string; mono?: boole
   );
 }
 
-/* ===================== ACCOUNT SUB-SCREENS ===================== */
-const DETAILS: Record<string, { rows: [string, string][]; note?: string }> = {
-  "Mes lavages": { rows: [["Standard · Maârif", "Terminé · 12 mai · 100 MAD"], ["Express · Gauthier", "Terminé · 3 mai · 60 MAD"], ["Premium · Anfa", "Terminé · 28 avr · 220 MAD"]], note: "Ton historique complet de lavages apparaît ici." },
-  "Mes adresses": { rows: [["🏠 Domicile", "Résidence Al Manar, Maârif"], ["🏢 Bureau", "Twin Center, Casablanca"]], note: "Ajoute une nouvelle adresse depuis l'écran de réservation (« Choisir ma position »)." },
-  "Paiement": { rows: [["💳 Visa ·· 4291", "Expire 04/27 · par défaut"], ["💵 Espèces", "Payer le laveur à la fin"]], note: "Le paiement est sécurisé. Tu peux payer en espèces à la fin du lavage." },
-  "Parrainage & crédits": { rows: [["Ton code", "YASSINE50"], ["Crédit disponible", "120 MAD"], ["Amis parrainés", "3"]], note: "Partage ton code : 50 MAD offerts pour toi et ton ami au 1er lavage." },
-  "Notifications": { rows: [["Suivi du laveur", "Activé"], ["Promotions & offres", "Activé"], ["Rappels de RDV", "Activé"]], note: "Gère les notifications que tu reçois." },
-  "Paramètres": { rows: [["Langue", "Français"], ["Confidentialité", "Gérer"], ["Aide & support", "Nous contacter"], ["À propos", "Autokhidma v1.0"]] },
-};
-function AccountDetail({ label, onBack }: { label: string; onBack: () => void }) {
-  const d = DETAILS[label] ?? { rows: [] as [string, string][] };
+/* ── account sub-screens (real data) ── */
+function SubScreen({ title, onBack, children }: { title: string; onBack: () => void; children: React.ReactNode }) {
   return (
     <div className="scrl" style={{ position: "fixed", inset: 0, zIndex: 40, overflowY: "auto", background: "#F6F7FB", animation: "m_modalIn .38s var(--spring-soft, cubic-bezier(.26,1.14,.4,1)) both", paddingBottom: 40 }}>
       <div style={{ ...S.marketHead, display: "flex", alignItems: "center", gap: 12 }}>
         <BackBtn onClick={onBack} />
-        <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>{label}</div>
+        <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>{title}</div>
       </div>
-      <div style={{ padding: "16px 18px 0" }}>
-        <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
-          {d.rows.map(([t, s], i) => (
-            <div key={t} className="tap" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "14px 15px", borderBottom: i < d.rows.length - 1 ? "1px solid #EEF1F7" : "none" }}>
-              <div style={{ minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{t}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{s}</div></div>
-              <span style={{ color: "#C2CADB", fontSize: 18 }}>›</span>
-            </div>
-          ))}
-        </div>
-        {d.note && <div style={{ fontSize: 12.5, color: "#5B6784", marginTop: 12, lineHeight: 1.5 }}>{d.note}</div>}
-      </div>
+      <div style={{ padding: "16px 18px 0" }}>{children}</div>
     </div>
   );
 }
 
-type ProfileData = { name: string; phone: string; email: string; city: string };
-function EditProfile({ profile, onSave, onBack }: { profile: ProfileData; onSave: (p: ProfileData) => void; onBack: () => void }) {
+function WashHistory({ history, onBack }: { history: BookingRec[]; onBack: () => void }) {
+  const statusFr: Record<string, [string, string, string]> = {
+    confirmed: ["Confirmé", "#0B3D91", "#E8EEFF"],
+    enroute: ["En route", "#8A5A00", "#FDF1DC"],
+    washing: ["En cours", "#046B62", "#E6FAF6"],
+    done: ["Terminé", "#046B62", "#E6FAF6"],
+    cancelled: ["Annulé", "#D14343", "#FDECEC"],
+  };
+  return (
+    <SubScreen title="Mes lavages" onBack={onBack}>
+      {history.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px" }}>
+          <div style={{ fontSize: 40 }}>🧾</div>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", marginTop: 12 }}>Pas encore de lavage</div>
+          <div style={{ fontSize: 13, color: "#5B6784", marginTop: 6 }}>Ta première réservation apparaîtra ici.</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+          {history.map((h) => {
+            const [lbl, fg, bg] = statusFr[h.status] ?? statusFr.confirmed;
+            return (
+              <div key={h.key} style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 42, height: 42, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 14, flex: "none", background: h.color }}>{h.initials}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{h.service} · {h.washerName}</div>
+                    <div style={{ fontSize: 12, color: "#5B6784", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.date} · {h.slot} · {h.address}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="mono" style={{ fontSize: 13.5, color: "#0A1735", fontWeight: 500 }}>{h.total} MAD</div>
+                    <span style={{ fontSize: 10, fontWeight: 800, color: fg, background: bg, padding: "3px 8px", borderRadius: 999 }}>{lbl}</span>
+                  </div>
+                </div>
+                {h.promo && <div style={{ fontSize: 11, color: "#046B62", fontWeight: 700, marginTop: 8 }}>🎁 Code {h.promo} appliqué (−20%)</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </SubScreen>
+  );
+}
+
+function Addresses({ onBack }: { onBack: () => void }) {
+  const store = useStore();
+  const [picking, setPicking] = useState(false);
+  const [namePick, setNamePick] = useState("Domicile");
+  const remove = (a: Address) => setStore({ addresses: store.addresses.filter((x) => !(x.name === a.name && x.label === a.label)) });
+  return (
+    <SubScreen title="Mes adresses" onBack={onBack}>
+      {store.addresses.length === 0 && (
+        <div style={{ textAlign: "center", padding: "30px 20px 20px", color: "#5B6784", fontSize: 13.5 }}>
+          <div style={{ fontSize: 38 }}>📍</div>
+          <div style={{ fontWeight: 800, fontSize: 16, color: "#0A1735", marginTop: 10 }}>Aucune adresse enregistrée</div>
+          <div style={{ marginTop: 5 }}>Ajoute ton domicile ou ton bureau pour réserver en 2 secondes.</div>
+        </div>
+      )}
+      {store.addresses.length > 0 && (
+        <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", marginBottom: 14 }}>
+          {store.addresses.map((a, i) => (
+            <div key={a.name + a.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < store.addresses.length - 1 ? "1px solid #EEF1F7" : "none" }}>
+              <div style={{ width: 36, height: 36, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>{a.name === "Domicile" ? "🏠" : a.name === "Bureau" ? "🏢" : "📍"}</div>
+              <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 13.5, color: "#0A1735" }}>{a.name}</div><div style={{ fontSize: 12, color: "#5B6784", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.label}</div></div>
+              <span onClick={() => remove(a)} className="tap" style={{ color: "#D14343", fontWeight: 800, fontSize: 15, padding: 6 }}>✕</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {["Domicile", "Bureau", "Autre"].map((n) => (
+          <span key={n} onClick={() => setNamePick(n)} className="tap" style={{ flex: 1, textAlign: "center", background: namePick === n ? "#E8EEFF" : "#fff", border: `1.5px solid ${namePick === n ? "#1A4ED8" : "#E7EAF2"}`, color: namePick === n ? "#0B3D91" : "#5B6784", fontSize: 12.5, fontWeight: 700, padding: "9px 0", borderRadius: 12 }}>{n === "Domicile" ? "🏠" : n === "Bureau" ? "🏢" : "📍"} {n}</span>
+        ))}
+      </div>
+      <button onClick={() => setPicking(true)} className="tap" style={{ width: "100%", border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 14.5, padding: 14, borderRadius: 14, boxShadow: "0 10px 24px rgba(11,61,145,.3)" }}>Ajouter « {namePick} » sur la carte</button>
+      {picking && (
+        <LocationPicker
+          initial={null}
+          onConfirm={(p) => {
+            setStore({ addresses: [...store.addresses.filter((x) => x.name !== namePick || namePick === "Autre"), { name: namePick, label: p.label, lat: p.lat, lng: p.lng }] });
+            setPicking(false);
+          }}
+          onCancel={() => setPicking(false)}
+        />
+      )}
+    </SubScreen>
+  );
+}
+
+function Payment({ onBack }: { onBack: () => void }) {
+  return (
+    <SubScreen title="Paiement" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "15px" }}>
+          <div style={{ width: 38, height: 38, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>💵</div>
+          <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Espèces</div><div style={{ fontSize: 12, color: "#5B6784" }}>Paye le laveur à la fin du lavage</div></div>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: "#046B62", background: "#E6FAF6", padding: "4px 9px", borderRadius: 999 }}>PAR DÉFAUT ✓</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "15px", borderTop: "1px solid #EEF1F7", opacity: 0.55 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 11, background: "#FDF1DC", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>💳</div>
+          <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Carte bancaire</div><div style={{ fontSize: 12, color: "#5B6784" }}>CMI / Visa / Mastercard</div></div>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: "#8A5A00", background: "#FDF1DC", padding: "4px 9px", borderRadius: 999 }}>BIENTÔT</span>
+        </div>
+      </div>
+      <div style={{ fontSize: 12.5, color: "#5B6784", marginTop: 12, lineHeight: 1.5 }}>Aucune donnée bancaire n&apos;est stockée dans l&apos;app. Le paiement en espèces se fait directement avec ton laveur.</div>
+    </SubScreen>
+  );
+}
+
+function Referral({ name, onBack }: { name: string; onBack: () => void }) {
+  const code = (name ? name.split(/\s+/)[0].toUpperCase().replace(/[^A-Z]/g, "").slice(0, 10) : "AUTOWASH") + "20";
+  const [copied, setCopied] = useState(false);
+  const share = async () => {
+    const text = `🚿 Autokhidma Wash — ton lavage à domicile à Casablanca. Utilise mon code ${code} pour −20% sur ton 1er lavage !`;
+    try {
+      if (navigator.share) { await navigator.share({ text }); return; }
+    } catch { /* user closed the sheet */ }
+    try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* clipboard blocked */ }
+  };
+  return (
+    <SubScreen title="Parrainage & crédits" onBack={onBack}>
+      <div style={{ background: "linear-gradient(120deg,#0B3D91,#06B6A6)", borderRadius: 20, padding: 22, color: "#fff", textAlign: "center" }}>
+        <div style={{ fontSize: 13, opacity: 0.85 }}>Ton code de parrainage</div>
+        <div className="mono" style={{ fontSize: 30, fontWeight: 500, letterSpacing: ".08em", marginTop: 8 }}>{code}</div>
+        <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 10, lineHeight: 1.5 }}>Partage ton code : ton ami reçoit −20% sur son 1er lavage.</div>
+        <button onClick={share} className="tap" style={{ marginTop: 16, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 14, padding: "12px 22px", borderRadius: 13 }}>{copied ? "Copié ✓" : "Partager mon code"}</button>
+      </div>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 15, marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Crédit disponible</div><div style={{ fontSize: 12, color: "#5B6784" }}>Gagné via le parrainage</div></div>
+        <div className="mono" style={{ fontSize: 18, color: "#0A1735", fontWeight: 500 }}>0 MAD</div>
+      </div>
+    </SubScreen>
+  );
+}
+
+function Notifs({ onBack }: { onBack: () => void }) {
+  const store = useStore();
+  const rows: { key: keyof typeof store.notif; label: string; desc: string }[] = [
+    { key: "track", label: "Suivi du laveur", desc: "Arrivée, début et fin du lavage" },
+    { key: "promo", label: "Promotions & offres", desc: "Codes promo et bons plans" },
+    { key: "reminders", label: "Rappels de RDV", desc: "Rappel avant ton créneau" },
+  ];
+  return (
+    <SubScreen title="Notifications" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
+        {rows.map((r, i) => {
+          const on = store.notif[r.key];
+          return (
+            <div key={r.key} onClick={() => setStore({ notif: { ...store.notif, [r.key]: !on } })} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < rows.length - 1 ? "1px solid #EEF1F7" : "none" }}>
+              <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{r.label}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{r.desc}</div></div>
+              <div style={{ width: 46, height: 27, borderRadius: 999, background: on ? "#06B6A6" : "#E7EAF2", position: "relative", transition: "background .25s", flex: "none" }}>
+                <span style={{ position: "absolute", top: 3, left: on ? 22 : 3, width: 21, height: 21, borderRadius: "50%", background: "#fff", boxShadow: "0 2px 6px rgba(10,23,53,.2)", transition: "left .25s var(--spring-soft, ease)" }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </SubScreen>
+  );
+}
+
+function Settings({ onBack }: { onBack: () => void }) {
+  const [privacy, setPrivacy] = useState(false);
+  const waSupport = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("Aide — Autokhidma Wash")}`;
+  return (
+    <SubScreen title="Paramètres" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Langue</div>
+          <span style={{ fontSize: 12.5, color: "#5B6784", fontWeight: 700 }}>🇫🇷 Français</span>
+        </div>
+        <div onClick={() => { window.open(waSupport, "_self"); }} className="tap" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
+          <div><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Aide & support</div><div style={{ fontSize: 12, color: "#5B6784" }}>Réponse sous 24h</div></div>
+          <span style={{ color: "#C2CADB", fontSize: 18 }}>›</span>
+        </div>
+        <div onClick={() => setPrivacy(!privacy)} className="tap" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Confidentialité</div>
+          <span style={{ color: "#C2CADB", fontSize: 18 }}>{privacy ? "▾" : "›"}</span>
+        </div>
+        {privacy && (
+          <div style={{ padding: "0 15px 14px", fontSize: 12.5, color: "#5B6784", lineHeight: 1.55 }}>
+            Tes données (profil, adresses, historique) sont stockées sur ton téléphone. Seules tes réservations sont envoyées à nos serveurs pour organiser le lavage. Ta position n&apos;est partagée qu&apos;avec le laveur que tu réserves. Aucune donnée n&apos;est vendue à des tiers.
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>À propos</div>
+          <span className="mono" style={{ fontSize: 12, color: "#8A94AE" }}>Autokhidma Wash v2.0</span>
+        </div>
+      </div>
+    </SubScreen>
+  );
+}
+
+function EditProfile({ profile, isLogged, onSave, onBack }: { profile: Profile; isLogged: boolean; onSave: (p: Profile) => void; onBack: () => void }) {
   const [name, setName] = useState(profile.name);
   const [phone, setPhone] = useState(profile.phone);
   const [email, setEmail] = useState(profile.email);
@@ -565,34 +941,23 @@ function EditProfile({ profile, onSave, onBack }: { profile: ProfileData; onSave
       </div>
       <div style={{ padding: "18px 18px 0" }}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}>
-          <div style={{ position: "relative", width: 78, height: 78, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 26 }}>{(name.trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase()) || "?"}<span style={{ position: "absolute", bottom: -2, right: -2, width: 26, height: 26, borderRadius: "50%", background: "#fff", border: "2px solid #E7EAF2", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>📷</span></div>
+          <div style={{ position: "relative", width: 78, height: 78, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 26 }}>{name.trim() ? initialsOf(name) : "?"}</div>
         </div>
-        <Field label="Nom complet" value={name} onChange={setName} />
-        <Field label="Téléphone" value={phone} onChange={setPhone} />
+        <Field label="Nom complet" value={name} onChange={setName} placeholder="Ton nom" />
+        <Field label="Téléphone" value={phone} onChange={setPhone} placeholder="+212 6 …" />
         <Field label="Email" value={email} onChange={setEmail} placeholder="ton@email.com" />
         <Field label="Ville" value={city} onChange={setCity} />
-        <button onClick={() => onSave({ name: name.trim() || "Yassine B.", phone, email, city })} className="tap" style={{ width: "100%", marginTop: 8, border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 15, borderRadius: 15, boxShadow: "0 10px 24px rgba(11,61,145,.32)" }}>Enregistrer</button>
+        {isLogged && <div style={{ fontSize: 11.5, color: "#8A94AE", marginBottom: 12 }}>Ton nom est aussi mis à jour sur ton compte.</div>}
+        <button onClick={() => onSave({ name: name.trim(), phone: phone.trim(), email: email.trim(), city: city.trim() })} className="tap" style={{ width: "100%", marginTop: 8, border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 15, borderRadius: 15, boxShadow: "0 10px 24px rgba(11,61,145,.32)" }}>Enregistrer</button>
       </div>
     </div>
   );
 }
-function Field({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+function Field({ label, value, onChange, placeholder, type }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#8A94AE", marginBottom: 7 }}>{label}</div>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ width: "100%", border: "1px solid #E7EAF2", background: "#fff", borderRadius: 13, padding: "13px 15px", fontFamily: "inherit", fontSize: 14.5, color: "#0A1735", outline: "none" }} />
-    </div>
-  );
-}
-
-function TrackingEmpty({ go }: { go: (s: Screen) => void }) {
-  return (
-    <div style={{ position: "relative", width: "100vw", height: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, background: "#F6F7FB", textAlign: "center" }}>
-      <div style={{ width: 84, height: 84, borderRadius: 24, background: "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38 }}>🚿</div>
-      <div style={{ fontWeight: 800, fontSize: 20, color: "#0A1735", marginTop: 18 }}>Aucun lavage en cours</div>
-      <div style={{ fontSize: 13.5, color: "#5B6784", marginTop: 6, maxWidth: 260 }}>Réserve un laveur et tu pourras suivre son arrivée en direct ici.</div>
-      <button onClick={() => go("market")} className="tap" style={{ marginTop: 22, border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 15, padding: "14px 24px", borderRadius: 14, boxShadow: "0 10px 24px rgba(11,61,145,.3)" }}>Réserver un laveur</button>
-      <button onClick={() => go("home")} className="tap" style={{ marginTop: 12, background: "none", border: "none", color: "#5B6784", fontFamily: "inherit", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Retour à l&apos;accueil</button>
+      <input type={type ?? "text"} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ width: "100%", border: "1px solid #E7EAF2", background: "#fff", borderRadius: 13, padding: "13px 15px", fontFamily: "inherit", fontSize: 14.5, color: "#0A1735", outline: "none" }} />
     </div>
   );
 }
@@ -664,40 +1029,85 @@ function RequestWash({ formules, formuleId, setFormuleId, clientPos, onPickLocat
   );
 }
 
-type Offer = { w: WasherLite; price: number; note: string };
-function Offers({ list, formule, proposedPrice, setProposedPrice, posLabel, onAccept, onCancel }: {
-  list: WasherLite[]; formule: Formule; proposedPrice: number; setProposedPrice: (n: number) => void;
+/* ===================== OFFERS (real feed + demo fallback) ===================== */
+type Offer = { w: WasherLite; price: number; note: string; real: boolean };
+
+type RealOfferRow = {
+  id: string; price: number; eta_minutes: number | null; status: string;
+  washer: { id: string; name: string; initials: string; color: string; rating: number; zone: string; eta_minutes: number } | null;
+};
+
+function Offers({ list, formule, requestId, proposedPrice, setProposedPrice, posLabel, onAccept, onCancel }: {
+  list: WasherLite[]; formule: Formule; requestId: string | null; proposedPrice: number; setProposedPrice: (n: number) => void;
   posLabel: string; onAccept: (w: WasherLite, price: number) => void; onCancel: () => void;
 }) {
-  const [offers, setOffers] = useState<Offer[]>([]);
+  const [realOffers, setRealOffers] = useState<Offer[]>([]);
+  const [demoOffers, setDemoOffers] = useState<Offer[]>([]);
+  const [refused, setRefused] = useState<string[]>([]);
   const pool = useMemo(() => list.filter((w) => w.available_now), [list]);
+  const hasRealRef = useRef(false);
 
-  // Washers reply in real time: some accept your price, some counter.
+  // REAL: poll wash_offers for this request — offers sent by actual washers
+  // (or by you, from the admin simulator) appear here live.
+  useEffect(() => {
+    if (!requestId) return;
+    let stop = false;
+    const tick = async () => {
+      const { data } = await supabase
+        .from("wash_offers")
+        .select("id, price, eta_minutes, status, washer:washers(id, name, initials, color, rating, zone, eta_minutes)")
+        .eq("request_id", requestId)
+        .neq("status", "withdrawn");
+      if (stop || !data) return;
+      const mapped: Offer[] = (data as unknown as RealOfferRow[])
+        .filter((r) => r.washer)
+        .map((r) => {
+          const base = list.find((w) => w.id === r.washer!.id);
+          const w: WasherLite = base ?? {
+            id: r.washer!.id, name: r.washer!.name, initials: r.washer!.initials, color: r.washer!.color,
+            rating: r.washer!.rating, reviews_count: 0, zone: r.washer!.zone, eta_minutes: r.eta_minutes ?? r.washer!.eta_minutes,
+            distance_km: 1, base_price: r.price, available_now: true, bio: "", is_super: false, lat: null, lng: null,
+          };
+          return { w, price: r.price, note: r.price <= proposedPrice ? "Accepte ton prix" : `Contre-offre`, real: true };
+        });
+      if (mapped.length) hasRealRef.current = true;
+      setRealOffers(mapped);
+    };
+    tick();
+    const iv = setInterval(tick, 2500);
+    return () => { stop = true; clearInterval(iv); };
+  }, [requestId, list, proposedPrice]);
+
+  // DEMO fallback: if no real washer answered after a while, simulated
+  // offers keep the flow alive (clearly part of the standard UX).
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];
     const plan: { at: number; idx: number; delta: number }[] = [
-      { at: 1400, idx: 0, delta: 0 },
-      { at: 3200, idx: 1, delta: 10 },
-      { at: 5200, idx: 2, delta: 20 },
-      { at: 7400, idx: 3, delta: 0 },
+      { at: 5000, idx: 0, delta: 0 },
+      { at: 7500, idx: 1, delta: 10 },
+      { at: 10000, idx: 2, delta: 20 },
     ];
     plan.forEach(({ at, idx, delta }) => {
       const w = pool[idx];
       if (!w) return;
       timers.push(setTimeout(() => {
-        setOffers((o) => (o.some((x) => x.w.id === w.id) ? o : [...o, { w, price: proposedPrice + delta, note: delta === 0 ? "Accepte ton prix" : `Contre-offre +${delta}` }]));
+        if (hasRealRef.current) return; // real offers arrived — no demo noise
+        setDemoOffers((o) => (o.some((x) => x.w.id === w.id) ? o : [...o, { w, price: proposedPrice + delta, note: delta === 0 ? "Accepte ton prix" : `Contre-offre +${delta}`, real: false }]));
       }, at));
     });
     return () => timers.forEach(clearTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const offers = (realOffers.length ? realOffers : demoOffers).filter((o) => !refused.includes(o.w.id));
+
   const raise = () => {
     const next = proposedPrice + 10;
     setProposedPrice(next);
-    setOffers((o) => o.map((x) => (x.note === "Accepte ton prix" ? { ...x, price: next } : x)));
-    const w = pool.find((p) => !offers.some((x) => x.w.id === p.id));
-    if (w) setTimeout(() => setOffers((o) => (o.some((x) => x.w.id === w.id) ? o : [...o, { w, price: next, note: "Accepte ton prix" }])), 900);
+    if (requestId) {
+      supabase.from("wash_requests").update({ proposed_price: next }).eq("id", requestId).then(() => {});
+    }
+    setDemoOffers((o) => o.map((x) => (x.note === "Accepte ton prix" ? { ...x, price: next } : x)));
   };
 
   return (
@@ -730,7 +1140,7 @@ function Offers({ list, formule, proposedPrice, setProposedPrice, posLabel, onAc
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 9, marginTop: 13 }}>
-                  <button onClick={() => setOffers((x) => x.filter((y) => y.w.id !== o.w.id))} className="tap" style={{ flex: 1, background: "#F6F7FB", border: "1px solid #E7EAF2", color: "#5B6784", fontFamily: "inherit", fontWeight: 700, fontSize: 13.5, padding: 12, borderRadius: 13 }}>Refuser</button>
+                  <button onClick={() => setRefused((r) => [...r, o.w.id])} className="tap" style={{ flex: 1, background: "#F6F7FB", border: "1px solid #E7EAF2", color: "#5B6784", fontFamily: "inherit", fontWeight: 700, fontSize: 13.5, padding: 12, borderRadius: 13 }}>Refuser</button>
                   <button onClick={() => onAccept(o.w, o.price)} className="tap" style={{ flex: 2, background: same ? "linear-gradient(120deg,#06B6A6,#0B7A6D)" : "linear-gradient(120deg,#0B3D91,#1A4ED8)", border: "none", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 13.5, padding: 12, borderRadius: 13 }}>Accepter · {o.price} MAD</button>
                 </div>
               </div>
@@ -745,7 +1155,7 @@ function Offers({ list, formule, proposedPrice, setProposedPrice, posLabel, onAc
   );
 }
 
-/* ===================== DEVENIR LAVEUR (Pro landing) ===================== */
+/* ===================== DEVENIR LAVEUR (Pro landing + real application) ===================== */
 const PRO_BENEFITS = [
   { icon: "💰", bg: "#FDF1DC", title: "Jusqu'à 6 000 MAD/mois", desc: "Tu gardes l'essentiel de chaque lavage." },
   { icon: "🕒", bg: "#E8EEFF", title: "Horaires 100% libres", desc: "Tu te connectes quand tu veux, où tu veux." },
@@ -760,8 +1170,8 @@ const PRO_REQS = [
   { title: "Matériel de lavage", desc: "Ton kit, ou commande le kit Autokhidma de départ." },
   { title: "Vérification", desc: "Casier vierge + court entretien de validation." },
 ];
-function ProLanding({ onBack }: { onBack: () => void }) {
-  const openPro = () => { window.location.href = "/m/pro?native=pro"; };
+function ProLanding({ onBack, profile }: { onBack: () => void; profile: Profile }) {
+  const [applying, setApplying] = useState(false);
   return (
     <>
       <div className="scrl" style={{ ...S.scr, paddingBottom: 130 }}>
@@ -798,36 +1208,111 @@ function ProLanding({ onBack }: { onBack: () => void }) {
           </div>
           <div style={{ ...S.h2, margin: "24px 0 13px" }}>Comment commencer</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {[["01", "#E8EEFF", "#0B3D91", "Crée ton profil laveur"], ["02", "#E6FAF6", "#046B62", "Envoie tes documents (CIN, selfie)"], ["03", "#FDF1DC", "#8A5A00", "Validation sous 48h, puis tes 1ers lavages"]].map(([n, bg, fg, t]) => (
+            {[["01", "#E8EEFF", "#0B3D91", "Envoie ta candidature (2 min)"], ["02", "#E6FAF6", "#046B62", "Envoie tes documents (CIN, selfie)"], ["03", "#FDF1DC", "#8A5A00", "Validation sous 48h, puis tes 1ers lavages"]].map(([n, bg, fg, t]) => (
               <div key={n} style={{ display: "flex", gap: 13, alignItems: "center" }}><div className="mono" style={{ width: 34, height: 34, borderRadius: 11, background: bg, color: fg, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flex: "none" }}>{n}</div><div style={{ fontSize: 13.5, color: "#1B2B54", fontWeight: 600 }}>{t}</div></div>
             ))}
           </div>
         </div>
       </div>
       <div style={{ ...S.cta, paddingTop: 13 }}>
-        <button onClick={openPro} className="tap" style={{ ...S.ctaBtn, background: "linear-gradient(120deg,#0B7A6D,#06B6A6)", boxShadow: "0 10px 24px rgba(6,182,166,.32)" }}>Ouvrir l&apos;Espace Pro →</button>
+        <button onClick={() => setApplying(true)} className="tap" style={{ ...S.ctaBtn, background: "linear-gradient(120deg,#0B7A6D,#06B6A6)", boxShadow: "0 10px 24px rgba(6,182,166,.32)" }}>Envoyer ma candidature →</button>
       </div>
+      {applying && <ProApply profile={profile} onClose={() => setApplying(false)} />}
     </>
   );
 }
 
-/* ===================== LOGIN ===================== */
-function Login({ onContinue }: { onContinue: () => void }) {
+function ProApply({ profile, onClose }: { profile: Profile; onClose: () => void }) {
+  const [name, setName] = useState(profile.name);
+  const [phone, setPhone] = useState(profile.phone);
+  const [city, setCity] = useState(profile.city || "Casablanca");
+  const [transport, setTransport] = useState("Scooter");
+  const send = () => {
+    const subject = "Candidature laveur — Autokhidma Wash";
+    const body = `Bonjour,\n\nJe veux devenir laveur partenaire Autokhidma.\n\nNom : ${name}\nTéléphone : ${phone}\nVille : ${city}\nDéplacement : ${transport}\n\nMerci !`;
+    window.open(`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, "_self");
+  };
+  const ok = name.trim().length >= 2 && phone.trim().length >= 9;
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 28, background: "radial-gradient(600px 460px at 50% 12%,#16357F,#0A1735 68%)", display: "flex", flexDirection: "column", padding: "0 26px", overflow: "hidden", animation: "var(--scr-anim, m_slideInRight) var(--scr-dur, .42s) var(--spring-soft, cubic-bezier(.26,1.14,.4,1)) both" }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 45, background: "rgba(10,23,53,.5)", display: "flex", alignItems: "flex-end" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: "#fff", borderRadius: "24px 24px 0 0", padding: "14px 20px calc(env(safe-area-inset-bottom,0px) + 20px)", animation: "m_sheetUp .45s var(--spring, cubic-bezier(.3,1.36,.44,1)) both" }}>
+        <div style={{ width: 40, height: 4, background: "#E7EAF2", borderRadius: 999, margin: "0 auto 16px" }} />
+        <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", marginBottom: 4 }}>Ta candidature laveur</div>
+        <div style={{ fontSize: 12.5, color: "#5B6784", marginBottom: 16 }}>On te répond sous 48h pour l&apos;entretien.</div>
+        <Field label="Nom complet" value={name} onChange={setName} placeholder="Ton nom" />
+        <Field label="Téléphone" value={phone} onChange={setPhone} placeholder="+212 6 …" />
+        <Field label="Ville" value={city} onChange={setCity} />
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#8A94AE", marginBottom: 7 }}>Déplacement</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+          {["Scooter", "Voiture", "Vélo"].map((t) => (
+            <span key={t} onClick={() => setTransport(t)} className="tap" style={{ flex: 1, textAlign: "center", background: transport === t ? "#E8EEFF" : "#F6F7FB", border: `1.5px solid ${transport === t ? "#1A4ED8" : "#E7EAF2"}`, color: transport === t ? "#0B3D91" : "#5B6784", fontSize: 12.5, fontWeight: 700, padding: "10px 0", borderRadius: 12 }}>{t}</span>
+          ))}
+        </div>
+        <button onClick={send} disabled={!ok} className="tap" style={{ ...S.ctaBtn, background: ok ? "linear-gradient(120deg,#0B7A6D,#06B6A6)" : "#C2CADB", boxShadow: ok ? "0 10px 24px rgba(6,182,166,.32)" : "none" }}>Envoyer ma candidature ✉️</button>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== LOGIN (real Supabase email auth, optional) ===================== */
+function Login({ onContinue }: { onContinue: () => void }) {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  const submit = async () => {
+    setErr(null); setInfo(null);
+    if (!email.includes("@") || password.length < 6) {
+      setErr("Email valide + mot de passe (6 caractères min).");
+      return;
+    }
+    if (mode === "signup" && name.trim().length < 2) {
+      setErr("Ton nom est requis pour créer le compte.");
+      return;
+    }
+    setBusy(true);
+    try {
+      if (mode === "signup") {
+        const { data, error } = await signUp(email.trim(), password, name.trim());
+        if (error) { setErr(error.message === "User already registered" ? "Un compte existe déjà avec cet email." : error.message); return; }
+        setStore({ profile: { ...((): Profile => ({ name: name.trim(), phone: "", email: email.trim(), city: "Casablanca" }))() } });
+        if (!data.session) { setInfo("Compte créé ✓ — vérifie ta boîte mail pour confirmer, puis connecte-toi."); setMode("login"); return; }
+        onContinue();
+      } else {
+        const { error } = await signIn(email.trim(), password);
+        if (error) { setErr(/confirm/i.test(error.message) ? "Confirme d'abord ton email (lien reçu par mail)." : "Email ou mot de passe incorrect."); return; }
+        onContinue();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputStyle: CSSProperties = { width: "100%", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 15, padding: "15px 16px", color: "#fff", fontFamily: "inherit", fontSize: 15, outline: "none", marginBottom: 11 };
+  return (
+    <div className="scrl" style={{ position: "fixed", inset: 0, zIndex: 28, background: "radial-gradient(600px 460px at 50% 12%,#16357F,#0A1735 68%)", display: "flex", flexDirection: "column", padding: "0 26px", overflowY: "auto", animation: "var(--scr-anim, m_slideInRight) var(--scr-dur, .42s) var(--spring-soft, cubic-bezier(.26,1.14,.4,1)) both" }}>
       <div style={{ position: "absolute", top: -50, right: -50, width: 200, height: 200, borderRadius: "50%", background: "radial-gradient(circle,rgba(6,182,166,.4),transparent 70%)", filter: "blur(18px)", animation: "m_orb 8s ease-in-out infinite" }} />
-      <div style={{ marginTop: "calc(env(safe-area-inset-top,0px) + 70px)", animation: "m_fadeUp .6s both" }}>
+      <div style={{ marginTop: "calc(env(safe-area-inset-top,0px) + 54px)", animation: "m_fadeUp .6s both" }}>
         <div style={{ width: 64, height: 64, borderRadius: 20, background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 16px 36px rgba(6,182,166,.45)" }}><Drop size={34} stroke="#fff" sw={1.9} /></div>
-        <div style={{ color: "#fff", fontWeight: 800, fontSize: 27, letterSpacing: "-.02em", marginTop: 22, lineHeight: 1.15 }}>Bienvenue sur<br />Autokhidma Wash</div>
-        <div style={{ color: "rgba(255,255,255,.6)", fontSize: 14, marginTop: 8 }}>Connecte-toi pour réserver ton laveur en quelques secondes.</div>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 26, letterSpacing: "-.02em", marginTop: 20, lineHeight: 1.15 }}>{mode === "login" ? "Content de te revoir 👋" : "Crée ton compte"}</div>
+        <div style={{ color: "rgba(255,255,255,.6)", fontSize: 14, marginTop: 8 }}>{mode === "login" ? "Connecte-toi pour retrouver ton historique partout." : "Ton historique et tes adresses te suivront partout."}</div>
       </div>
-      <div style={{ marginTop: 30, animation: "m_fadeUp .6s .12s both" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 15, padding: "15px 16px" }}><span style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>🇲🇦 +212</span><div style={{ width: 1, height: 20, background: "rgba(255,255,255,.2)" }} /><span style={{ color: "rgba(255,255,255,.5)", fontSize: 15 }}>6 12 34 56 78</span></div>
-        <button onClick={onContinue} className="tap" style={{ width: "100%", marginTop: 14, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 16, borderRadius: 15 }}>Continuer →</button>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}><div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.14)" }} /><span style={{ color: "rgba(255,255,255,.4)", fontSize: 12 }}>ou</span><div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.14)" }} /></div>
-        <button onClick={onContinue} className="tap" style={{ width: "100%", border: "1px solid rgba(255,255,255,.2)", background: "rgba(255,255,255,.06)", color: "#fff", fontFamily: "inherit", fontWeight: 700, fontSize: 14.5, padding: 15, borderRadius: 15, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}><svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.7.4-1.1.6-1.4-2.2-.3-4.5-1.1-4.5-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.6 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.3.2 2.3.1 2.6.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.5 5 .4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A10 10 0 0 0 12 2Z" /></svg>Continuer avec Google</button>
+      <div style={{ marginTop: 26, animation: "m_fadeUp .6s .12s both" }}>
+        {mode === "signup" && <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nom complet" style={inputStyle} autoComplete="name" />}
+        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ton@email.com" style={inputStyle} type="email" autoComplete="email" inputMode="email" autoCapitalize="none" />
+        <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" style={inputStyle} type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} />
+        {err && <div style={{ color: "#FFB4B4", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{err}</div>}
+        {info && <div style={{ color: "#7FD4F5", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{info}</div>}
+        <button onClick={submit} disabled={busy} className="tap" style={{ width: "100%", marginTop: 4, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 16, borderRadius: 15, opacity: busy ? 0.6 : 1 }}>{busy ? "Un instant…" : mode === "login" ? "Se connecter →" : "Créer mon compte →"}</button>
+        <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setErr(null); setInfo(null); }} className="tap" style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "#7FD4F5", fontFamily: "inherit", fontWeight: 700, fontSize: 13.5 }}>{mode === "login" ? "Pas de compte ? Crée-en un" : "Déjà un compte ? Connecte-toi"}</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "18px 0" }}><div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.14)" }} /><span style={{ color: "rgba(255,255,255,.4)", fontSize: 12 }}>ou</span><div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.14)" }} /></div>
+        <button onClick={onContinue} className="tap" style={{ width: "100%", border: "1px solid rgba(255,255,255,.2)", background: "rgba(255,255,255,.06)", color: "#fff", fontFamily: "inherit", fontWeight: 700, fontSize: 14.5, padding: 15, borderRadius: 15 }}>Continuer sans compte</button>
       </div>
-      <div style={{ marginTop: "auto", marginBottom: "calc(env(safe-area-inset-bottom,0px) + 26px)", textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 11.5, animation: "m_fadeUp .6s .2s both" }}>En continuant, tu acceptes nos Conditions &amp; Confidentialité.</div>
+      <div style={{ marginTop: "auto", paddingTop: 20, marginBottom: "calc(env(safe-area-inset-bottom,0px) + 24px)", textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 11.5, animation: "m_fadeUp .6s .2s both" }}>En continuant, tu acceptes nos Conditions &amp; Confidentialité.</div>
     </div>
   );
 }
@@ -902,16 +1387,6 @@ function WasherRow({ w, onClick, i = 0 }: { w: WasherLite; onClick: () => void; 
 function BackBtn({ onClick }: { onClick: () => void }) {
   return <button onClick={onClick} className="tap" style={{ width: 40, height: 40, borderRadius: 13, background: "#F6F7FB", border: "1px solid #E7EAF2", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#0A1735" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6" /></svg></button>;
 }
-function Placeholder({ screen, onBack }: { screen: string; onBack: () => void }) {
-  return (
-    <div style={S.ph}>
-      <div style={{ fontSize: 40 }}>🚧</div>
-      <div style={{ fontWeight: 800, fontSize: 20, color: "#0A1735", marginTop: 12 }}>{screen === "pro" ? "Espace Pro" : "Connexion"}</div>
-      <div style={{ fontSize: 13, color: "#5B6784", marginTop: 6, textAlign: "center", maxWidth: 250 }}>Écran en cours de construction (prochaine phase), fidèle à la maquette.</div>
-      <button onClick={onBack} className="tap" style={S.phBtn}>‹ Retour à l&apos;accueil</button>
-    </div>
-  );
-}
 
 /* ===================== icons ===================== */
 type GlyphIcon = "bolt" | "drop" | "shield" | "user";
@@ -984,7 +1459,4 @@ const S: Record<string, CSSProperties> = {
   ctaBtn: { width: "100%", border: "none", background: "linear-gradient(120deg,#0B3D91,#1A4ED8)", color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 15.5, padding: 15, borderRadius: 15, cursor: "pointer", boxShadow: "0 10px 24px rgba(11,61,145,.35)" },
 
   confirm: { position: "fixed", inset: 0, zIndex: 25, background: "radial-gradient(600px 440px at 50% 20%,#16357F,#0A1735 65%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, overflow: "hidden" },
-
-  ph: { position: "fixed", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, background: "#F6F7FB" },
-  phBtn: { marginTop: 22, border: "1px solid #E7EAF2", background: "#fff", color: "#1B2B54", fontFamily: "inherit", fontWeight: 700, fontSize: 14, padding: "11px 18px", borderRadius: 12, cursor: "pointer" },
 };
