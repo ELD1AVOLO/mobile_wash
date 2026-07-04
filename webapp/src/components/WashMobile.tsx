@@ -723,15 +723,30 @@ function Stat({ v, l, c, mono }: { v: string; l: string; c: string; mono?: boole
   );
 }
 
-/* ── account sub-screens (real data) ── */
-function SubScreen({ title, onBack, children }: { title: string; onBack: () => void; children: React.ReactNode }) {
+/* ── account sub-screens (real data, themed like the rest of the app) ── */
+function SubScreen({ title, sub, icon, iconBg, onBack, children }: { title: string; sub?: string; icon?: string; iconBg?: string; onBack: () => void; children: React.ReactNode }) {
   return (
     <div className="scrl" style={{ position: "fixed", inset: 0, zIndex: 40, overflowY: "auto", background: "#F6F7FB", animation: "m_modalIn .38s var(--spring-soft, cubic-bezier(.26,1.14,.4,1)) both", paddingBottom: 40 }}>
       <div style={{ ...S.marketHead, display: "flex", alignItems: "center", gap: 12 }}>
         <BackBtn onClick={onBack} />
-        <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>{title}</div>
+        {icon && <div style={{ width: 42, height: 42, borderRadius: 13, background: iconBg ?? "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flex: "none", animation: "m_popIn .5s .08s cubic-bezier(.22,1,.36,1) both" }}>{icon}</div>}
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>{title}</div>
+          {sub && <div style={{ fontSize: 11.5, color: "#5B6784", marginTop: 1 }}>{sub}</div>}
+        </div>
       </div>
       <div style={{ padding: "16px 18px 0" }}>{children}</div>
+    </div>
+  );
+}
+
+/** Themed empty state: gradient tile + message, same design language as the hero. */
+function EmptyState({ emoji, title, sub }: { emoji: string; title: string; sub: string }) {
+  return (
+    <div style={{ textAlign: "center", padding: "44px 20px 26px", animation: "m_fadeUp .5s .05s both" }}>
+      <div style={{ width: 84, height: 84, borderRadius: 26, margin: "0 auto", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", boxShadow: "0 18px 36px -10px rgba(6,182,166,.5)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38, animation: "m_popIn .6s .1s cubic-bezier(.22,1.3,.36,1) both" }}>{emoji}</div>
+      <div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", marginTop: 16 }}>{title}</div>
+      <div style={{ fontSize: 13, color: "#5B6784", marginTop: 6, lineHeight: 1.5 }}>{sub}</div>
     </div>
   );
 }
@@ -745,19 +760,15 @@ function WashHistory({ history, onBack }: { history: BookingRec[]; onBack: () =>
     cancelled: ["Annulé", "#D14343", "#FDECEC"],
   };
   return (
-    <SubScreen title="Mes lavages" onBack={onBack}>
+    <SubScreen title="Mes lavages" sub="Ton historique complet" icon="🧾" iconBg="#E8EEFF" onBack={onBack}>
       {history.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "50px 20px" }}>
-          <div style={{ fontSize: 40 }}>🧾</div>
-          <div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", marginTop: 12 }}>Pas encore de lavage</div>
-          <div style={{ fontSize: 13, color: "#5B6784", marginTop: 6 }}>Ta première réservation apparaîtra ici.</div>
-        </div>
+        <EmptyState emoji="🧾" title="Pas encore de lavage" sub="Ta première réservation apparaîtra ici, avec son statut en direct." />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-          {history.map((h) => {
+          {history.map((h, i) => {
             const [lbl, fg, bg] = statusFr[h.status] ?? statusFr.confirmed;
             return (
-              <div key={h.key} style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 14 }}>
+              <div key={h.key} style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 14, boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: `m_fadeUp .5s ${0.06 + i * 0.06}s var(--ease-out, cubic-bezier(.22,1,.36,1)) both` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ width: 42, height: 42, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 14, flex: "none", background: h.color }}>{h.initials}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -785,18 +796,14 @@ function Addresses({ onBack }: { onBack: () => void }) {
   const [namePick, setNamePick] = useState("Domicile");
   const remove = (a: Address) => setStore({ addresses: store.addresses.filter((x) => !(x.name === a.name && x.label === a.label)) });
   return (
-    <SubScreen title="Mes adresses" onBack={onBack}>
+    <SubScreen title="Mes adresses" sub="Tes lieux enregistrés" icon="📍" iconBg="#E6FAF6" onBack={onBack}>
       {store.addresses.length === 0 && (
-        <div style={{ textAlign: "center", padding: "30px 20px 20px", color: "#5B6784", fontSize: 13.5 }}>
-          <div style={{ fontSize: 38 }}>📍</div>
-          <div style={{ fontWeight: 800, fontSize: 16, color: "#0A1735", marginTop: 10 }}>Aucune adresse enregistrée</div>
-          <div style={{ marginTop: 5 }}>Ajoute ton domicile ou ton bureau pour réserver en 2 secondes.</div>
-        </div>
+        <EmptyState emoji="📍" title="Aucune adresse enregistrée" sub="Ajoute ton domicile ou ton bureau pour réserver en 2 secondes." />
       )}
       {store.addresses.length > 0 && (
-        <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", marginBottom: 14 }}>
+        <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", marginBottom: 14, boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
           {store.addresses.map((a, i) => (
-            <div key={a.name + a.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < store.addresses.length - 1 ? "1px solid #EEF1F7" : "none" }}>
+            <div key={a.name + a.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < store.addresses.length - 1 ? "1px solid #EEF1F7" : "none", animation: `m_fadeUp .45s ${0.08 + i * 0.05}s var(--ease-out, cubic-bezier(.22,1,.36,1)) both` }}>
               <div style={{ width: 36, height: 36, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>{a.name === "Domicile" ? "🏠" : a.name === "Bureau" ? "🏢" : "📍"}</div>
               <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 13.5, color: "#0A1735" }}>{a.name}</div><div style={{ fontSize: 12, color: "#5B6784", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.label}</div></div>
               <span onClick={() => remove(a)} className="tap" style={{ color: "#D14343", fontWeight: 800, fontSize: 15, padding: 6 }}>✕</span>
@@ -826,8 +833,8 @@ function Addresses({ onBack }: { onBack: () => void }) {
 
 function Payment({ onBack }: { onBack: () => void }) {
   return (
-    <SubScreen title="Paiement" onBack={onBack}>
-      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
+    <SubScreen title="Paiement" sub="Comment tu paies ton lavage" icon="💳" iconBg="#FDF1DC" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "15px" }}>
           <div style={{ width: 38, height: 38, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>💵</div>
           <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Espèces</div><div style={{ fontSize: 12, color: "#5B6784" }}>Paye le laveur à la fin du lavage</div></div>
@@ -855,16 +862,23 @@ function Referral({ name, onBack }: { name: string; onBack: () => void }) {
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* clipboard blocked */ }
   };
   return (
-    <SubScreen title="Parrainage & crédits" onBack={onBack}>
-      <div style={{ background: "linear-gradient(120deg,#0B3D91,#06B6A6)", borderRadius: 20, padding: 22, color: "#fff", textAlign: "center" }}>
-        <div style={{ fontSize: 13, opacity: 0.85 }}>Ton code de parrainage</div>
-        <div className="mono" style={{ fontSize: 30, fontWeight: 500, letterSpacing: ".08em", marginTop: 8 }}>{code}</div>
-        <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 10, lineHeight: 1.5 }}>Partage ton code : ton ami reçoit −20% sur son 1er lavage.</div>
-        <button onClick={share} className="tap" style={{ marginTop: 16, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 14, padding: "12px 22px", borderRadius: 13 }}>{copied ? "Copié ✓" : "Partager mon code"}</button>
+    <SubScreen title="Parrainage & crédits" sub="Partage et gagne" icon="🎁" iconBg="#F1EBFB" onBack={onBack}>
+      <div style={{ position: "relative", overflow: "hidden", background: "linear-gradient(120deg,#0B3D91,#06B6A6)", borderRadius: 20, padding: 22, color: "#fff", textAlign: "center", boxShadow: "0 14px 30px rgba(11,61,145,.3)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+        <div style={{ position: "absolute", right: -24, top: -24, width: 120, height: 120, borderRadius: "50%", background: "rgba(127,212,245,.2)" }} />
+        <div style={{ position: "absolute", left: -30, bottom: -34, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,.08)" }} />
+        <div style={{ position: "relative", fontSize: 13, opacity: 0.85 }}>Ton code de parrainage</div>
+        <div className="mono" style={{ position: "relative", fontSize: 30, fontWeight: 500, letterSpacing: ".08em", marginTop: 8 }}>{code}</div>
+        <div style={{ position: "relative", fontSize: 12.5, opacity: 0.85, marginTop: 10, lineHeight: 1.5 }}>Partage ton code : ton ami reçoit −20% sur son 1er lavage.</div>
+        <button onClick={share} className="tap" style={{ position: "relative", marginTop: 16, border: "none", background: "#fff", color: "#0B3D91", fontFamily: "inherit", fontWeight: 800, fontSize: 14, padding: "12px 22px", borderRadius: 13, boxShadow: "0 8px 20px rgba(10,23,53,.25)" }}>{copied ? "Copié ✓" : "Partager mon code"}</button>
       </div>
-      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 15, marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, padding: 15, marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .14s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         <div><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Crédit disponible</div><div style={{ fontSize: 12, color: "#5B6784" }}>Gagné via le parrainage</div></div>
         <div className="mono" style={{ fontSize: 18, color: "#0A1735", fontWeight: 500 }}>0 MAD</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14, animation: "m_fadeUp .5s .2s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+        {[["01", "#E8EEFF", "#0B3D91", "Partage ton code à un ami"], ["02", "#E6FAF6", "#046B62", "Il réserve son 1er lavage avec"], ["03", "#FDF1DC", "#8A5A00", "Vous gagnez tous les deux des crédits"]].map(([n, bg, fg, t]) => (
+          <div key={n} style={{ display: "flex", gap: 13, alignItems: "center" }}><div className="mono" style={{ width: 34, height: 34, borderRadius: 11, background: bg, color: fg, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flex: "none" }}>{n}</div><div style={{ fontSize: 13.5, color: "#1B2B54", fontWeight: 600 }}>{t}</div></div>
+        ))}
       </div>
     </SubScreen>
   );
@@ -877,13 +891,16 @@ function Notifs({ onBack }: { onBack: () => void }) {
     { key: "promo", label: "Promotions & offres", desc: "Codes promo et bons plans" },
     { key: "reminders", label: "Rappels de RDV", desc: "Rappel avant ton créneau" },
   ];
+  const icons: Record<string, [string, string]> = { track: ["🚚", "#E8EEFF"], promo: ["🏷️", "#FDF1DC"], reminders: ["⏰", "#E6FAF6"] };
   return (
-    <SubScreen title="Notifications" onBack={onBack}>
-      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
+    <SubScreen title="Notifications" sub="Ce que tu reçois" icon="🔔" iconBg="#E8EEFF" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         {rows.map((r, i) => {
           const on = store.notif[r.key];
+          const [em, bg] = icons[r.key as string] ?? ["🔔", "#E8EEFF"];
           return (
-            <div key={r.key} onClick={() => setStore({ notif: { ...store.notif, [r.key]: !on } })} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < rows.length - 1 ? "1px solid #EEF1F7" : "none" }}>
+            <div key={r.key} onClick={() => setStore({ notif: { ...store.notif, [r.key]: !on } })} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: i < rows.length - 1 ? "1px solid #EEF1F7" : "none", animation: `m_fadeUp .45s ${0.08 + i * 0.05}s var(--ease-out, cubic-bezier(.22,1,.36,1)) both` }}>
+              <div style={{ width: 36, height: 36, borderRadius: 11, background: bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>{em}</div>
               <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{r.label}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{r.desc}</div></div>
               <div style={{ width: 46, height: 27, borderRadius: 999, background: on ? "#06B6A6" : "#E7EAF2", position: "relative", transition: "background .25s", flex: "none" }}>
                 <span style={{ position: "absolute", top: 3, left: on ? 22 : 3, width: 21, height: 21, borderRadius: "50%", background: "#fff", boxShadow: "0 2px 6px rgba(10,23,53,.2)", transition: "left .25s var(--spring-soft, ease)" }} />
@@ -899,30 +916,45 @@ function Notifs({ onBack }: { onBack: () => void }) {
 function Settings({ onBack }: { onBack: () => void }) {
   const [privacy, setPrivacy] = useState(false);
   const waSupport = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("Aide — Autokhidma Wash")}`;
+  const rowIcon = (em: string, bg: string) => (
+    <div style={{ width: 36, height: 36, borderRadius: 11, background: bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>{em}</div>
+  );
   return (
-    <SubScreen title="Paramètres" onBack={onBack}>
-      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Langue</div>
+    <SubScreen title="Paramètres" sub="App, aide & confidentialité" icon="⚙️" iconBg="#EEF1F7" onBack={onBack}>
+      <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: "1px solid #EEF1F7", animation: "m_fadeUp .45s .08s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+          {rowIcon("🌐", "#E8EEFF")}
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Langue</div>
           <span style={{ fontSize: 12.5, color: "#5B6784", fontWeight: 700 }}>🇫🇷 Français</span>
         </div>
-        <div onClick={() => { window.open(waSupport, "_self"); }} className="tap" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
-          <div><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Aide & support</div><div style={{ fontSize: 12, color: "#5B6784" }}>Réponse sous 24h</div></div>
+        <div onClick={() => { window.open(waSupport, "_self"); }} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: "1px solid #EEF1F7", animation: "m_fadeUp .45s .13s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+          {rowIcon("💬", "#E6FAF6")}
+          <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Aide & support</div><div style={{ fontSize: 12, color: "#5B6784" }}>Réponse sous 24h</div></div>
           <span style={{ color: "#C2CADB", fontSize: 18 }}>›</span>
         </div>
-        <div onClick={() => setPrivacy(!privacy)} className="tap" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px", borderBottom: "1px solid #EEF1F7" }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Confidentialité</div>
-          <span style={{ color: "#C2CADB", fontSize: 18 }}>{privacy ? "▾" : "›"}</span>
+        <div onClick={() => setPrivacy(!privacy)} className="tap" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: "1px solid #EEF1F7", animation: "m_fadeUp .45s .18s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+          {rowIcon("🔒", "#F1EBFB")}
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>Confidentialité</div>
+          <span style={{ color: "#C2CADB", fontSize: 18, transform: privacy ? "rotate(90deg)" : "none", transition: "transform .3s var(--spring-soft, ease)", display: "inline-block" }}>›</span>
         </div>
         {privacy && (
-          <div style={{ padding: "0 15px 14px", fontSize: 12.5, color: "#5B6784", lineHeight: 1.55 }}>
+          <div style={{ padding: "2px 15px 14px 63px", fontSize: 12.5, color: "#5B6784", lineHeight: 1.55, animation: "m_fadeUp .35s both" }}>
             Tes données (profil, adresses, historique) sont stockées sur ton téléphone. Seules tes réservations sont envoyées à nos serveurs pour organiser le lavage. Ta position n&apos;est partagée qu&apos;avec le laveur que tu réserves. Aucune donnée n&apos;est vendue à des tiers.
           </div>
         )}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 15px" }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: "#0A1735" }}>À propos</div>
-          <span className="mono" style={{ fontSize: 12, color: "#8A94AE" }}>Autokhidma Wash v2.0</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", animation: "m_fadeUp .45s .23s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+          {rowIcon("ℹ️", "#FDF1DC")}
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>À propos</div>
+          <span className="mono" style={{ fontSize: 12, color: "#8A94AE" }}>v2.0</span>
         </div>
+      </div>
+      {/* branded footer — same mark as the splash */}
+      <div style={{ textAlign: "center", marginTop: 26, animation: "m_fadeUp .6s .3s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 17, margin: "0 auto", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", boxShadow: "0 14px 28px -8px rgba(6,182,166,.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Drop size={28} stroke="#fff" sw={1.9} />
+        </div>
+        <div style={{ fontWeight: 800, fontSize: 15, color: "#0A1735", marginTop: 10, letterSpacing: "-.01em" }}>AUTOKHIDMA <span style={S.gradWash}>wash</span></div>
+        <div className="mono" style={{ fontSize: 10.5, color: "#8A94AE", marginTop: 3, letterSpacing: ".08em" }}>V2.0 · CASABLANCA 🇲🇦</div>
       </div>
     </SubScreen>
   );
