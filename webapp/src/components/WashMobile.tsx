@@ -344,10 +344,12 @@ function HomeHero({ list, go, onPick, avatarInits, promoOn }: { list: WasherLite
         </div>
       </div>
       <div style={S.heroBubbles}>
-        <HeroBubble label="Express" delay={0.05} float={0} grad="linear-gradient(150deg,#16D6C4,#0B7A6D)" shadow="rgba(11,122,109,.45)" icon="bolt" onClick={() => go("market")} />
-        <HeroBubble label="Standard" delay={0.12} float={0.4} grad="linear-gradient(150deg,#3A78FF,#0B3D91)" shadow="rgba(11,61,145,.45)" icon="drop" onClick={() => go("market")} />
-        <HeroBubble label="Premium" delay={0.19} float={0.8} grad="linear-gradient(150deg,#6D6BF2,#3B2EAE)" shadow="rgba(59,46,174,.45)" icon="shield" sparkle onClick={() => go("market")} />
-        <HeroBubble label="Laveurs" delay={0.26} float={1.2} grad="linear-gradient(150deg,#52C6EC,#1A6B96)" shadow="rgba(26,107,150,.45)" icon="user" onClick={() => go("market")} />
+        {/* Services de lavage: véhicules, tapis, salons, matelas.
+            Véhicule → marketplace laveurs; les autres → Commande à ton prix. */}
+        <HeroBubble label="Véhicule" delay={0.05} float={0} grad="linear-gradient(150deg,#3A78FF,#0B3D91)" shadow="rgba(11,61,145,.45)" icon="car" onClick={() => go("market")} />
+        <HeroBubble label="Tapis" delay={0.12} float={0.4} grad="linear-gradient(150deg,#16D6C4,#0B7A6D)" shadow="rgba(11,122,109,.45)" icon="rug" onClick={() => go("request")} />
+        <HeroBubble label="Salon" delay={0.19} float={0.8} grad="linear-gradient(150deg,#6D6BF2,#3B2EAE)" shadow="rgba(59,46,174,.45)" icon="sofa" sparkle onClick={() => go("request")} />
+        <HeroBubble label="Matelas" delay={0.26} float={1.2} grad="linear-gradient(150deg,#52C6EC,#1A6B96)" shadow="rgba(26,107,150,.45)" icon="bed" onClick={() => go("request")} />
       </div>
       <div style={{ padding: "22px 18px 0" }}>
         {/* inDrive-style: order at YOUR price */}
@@ -1421,7 +1423,7 @@ function BackBtn({ onClick }: { onClick: () => void }) {
 }
 
 /* ===================== icons ===================== */
-type GlyphIcon = "bolt" | "drop" | "shield" | "user";
+type GlyphIcon = "bolt" | "drop" | "shield" | "user" | "car" | "rug" | "sofa" | "bed";
 function Glyph({ icon, stroke, size }: { icon: GlyphIcon; stroke: string; size: number }) {
   const c = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke, strokeWidth: 1.9, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   switch (icon) {
@@ -1429,6 +1431,10 @@ function Glyph({ icon, stroke, size }: { icon: GlyphIcon; stroke: string; size: 
     case "drop": return (<svg {...c}><path d="M12 2.5C12 2.5 6 9 6 13.2A6 6 0 0 0 18 13.2C18 9 12 2.5 12 2.5Z" /></svg>);
     case "shield": return (<svg {...c}><path d="M12 3l7 3v5c0 4.6-3 7-7 9-4-2-7-4.4-7-9V6l7-3Z" /><path d="m9 12 2 2 4-4" /></svg>);
     case "user": return (<svg {...c}><circle cx="12" cy="8" r="4" /><path d="M5 21c0-4 3.5-6 7-6s7 2 7 6" /></svg>);
+    case "car": return (<svg {...c}><path d="M5 13l1.5-4.5A2 2 0 0 1 8.4 7h7.2a2 2 0 0 1 1.9 1.5L19 13M5 13h14v4a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H8v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-4Z" /><circle cx="7.5" cy="15.5" r=".6" /><circle cx="16.5" cy="15.5" r=".6" /></svg>);
+    case "rug": return (<svg {...c}><rect x="6.5" y="4" width="11" height="16" rx="1.5" /><path d="M9.5 8h5M9.5 12h5M9.5 16h5" /><path d="M4 6v2M4 11v2M4 16v2M20 6v2M20 11v2M20 16v2" /></svg>);
+    case "sofa": return (<svg {...c}><path d="M6 10V7a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3" /><path d="M2 12a2 2 0 0 1 4 0v2h12v-2a2 2 0 0 1 4 0v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4Z" /><path d="M5 20v1M19 20v1" /></svg>);
+    case "bed": return (<svg {...c}><path d="M2 19v-7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v7" /><path d="M4 10V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4" /><path d="M2 16.5h20" /><path d="M8 7.5h3M13 7.5h3" /></svg>);
   }
 }
 function Drop({ size, stroke, sw }: { size: number; stroke: string; sw: number }) {
