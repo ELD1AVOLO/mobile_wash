@@ -44,6 +44,21 @@ const DEMO_FORMULES: Formule[] = [
   { id: "premium", name: "Premium", desc: "Intérieur + cire · 2h", price: 220, icon: "🛡️", bg: "#F1EBFB" },
 ];
 
+/** Sticker icon from webapp/public/logos (user's 3D blue set). */
+function Ic({ name, size = 30 }: { name: string; size?: number }) {
+  return <img src={`/logos/${name}.png`} alt="" width={size} height={size} style={{ objectFit: "contain", display: "block" }} />;
+}
+
+/* Services "maison" (vapeur): tapis, salon, matelas — dispo via
+   Commande à ton prix. Fusionnés avec la DB quand l'admin les crée
+   (migration 015_home_services.sql / panel Promos & Services). */
+const HOME_IDS = ["tapis", "salon", "matelas"];
+const HOME_FORMULES: Formule[] = [
+  { id: "tapis", name: "Tapis", desc: "Nettoyage vapeur · prix au m²", price: 50, icon: "🧶", bg: "#E6FAF6" },
+  { id: "salon", name: "Salon", desc: "Canapés & fauteuils · vapeur", price: 150, icon: "🛋️", bg: "#F1EBFB" },
+  { id: "matelas", name: "Matelas", desc: "Lits & matelas · désinfection", price: 120, icon: "🛏️", bg: "#FDF1DC" },
+];
+
 const SLOTS = ["09:00", "10:30", "12:00", "14:30", "16:00", "18:00"];
 const DOW = ["DIM", "LUN", "MAR", "MER", "JEU", "VEN", "SAM"];
 const SERVICE_FEE = 8;
@@ -84,9 +99,16 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
   };
 
   const list: WasherLite[] = washers.length ? (washers as unknown as WasherLite[]) : DEMO_WASHERS;
-  const formules: Formule[] = services.length
-    ? services.map((s) => ({ id: s.id, name: s.name, desc: s.description || s.duration, price: s.price, icon: s.id === "express" ? "⚡" : s.id === "premium" ? "🛡️" : "💧", bg: s.id === "express" ? "#FDF1DC" : s.id === "premium" ? "#F1EBFB" : "#E8EEFF" }))
+  const dbFormules: Formule[] = services.length
+    ? services.map((s) => {
+        const home = HOME_FORMULES.find((h) => h.id === s.id);
+        return { id: s.id, name: s.name, desc: s.description || s.duration, price: s.price, icon: home?.icon ?? (s.id === "express" ? "⚡" : s.id === "premium" ? "🛡️" : "💧"), bg: home?.bg ?? (s.id === "express" ? "#FDF1DC" : s.id === "premium" ? "#F1EBFB" : "#E8EEFF") };
+      })
     : DEMO_FORMULES;
+  // Véhicule (réservation laveur) vs Maison (Commande à ton prix)
+  const vehFormules = dbFormules.filter((f) => !HOME_IDS.includes(f.id));
+  const homeFormules = HOME_FORMULES.map((h) => dbFormules.find((f) => f.id === h.id) ?? h);
+  const formules = [...vehFormules, ...homeFormules];
 
   // booking selections
   const [sel, setSel] = useState<WasherLite | null>(null);
@@ -256,11 +278,11 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
   return (
     <>
       {screen === "splash" && <Splash />}
-      {screen === "home" && <HomeHero list={list} go={go} onPick={openBooking} avatarInits={profileName ? initialsOf(profileName) : null} promoOn={promoOn} />}
+      {screen === "home" && <HomeHero list={list} go={go} onPick={openBooking} onService={(id) => { setFormuleId(id); go(id === "vehicule" ? "market" : "request"); }} avatarInits={profileName ? initialsOf(profileName) : null} promoOn={promoOn} />}
       {screen === "map" && <MobileMap washers={mapWashers} onBack={() => go("home")} onPick={(mw) => { const w = list.find((x) => x.id === mw.id); if (w) openBooking(w); }} />}
       {screen === "market" && <Market list={list} go={go} onPick={openBooking} />}
       {screen === "booking" && sel && (
-        <Booking sel={sel} formules={formules} formuleId={formuleId} setFormuleId={setFormuleId} dates={dates} dateIdx={dateIdx} setDateIdx={setDateIdx} slot={slot} setSlot={setSlot} price={price} basePrice={basePrice} promoOn={promoOn} total={total} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("market")} onConfirm={confirmBooking} savedAddresses={store.addresses} onPickSaved={(a) => setClientPos({ lat: a.lat, lng: a.lng, label: a.label })} />
+        <Booking sel={sel} formules={vehFormules} formuleId={HOME_IDS.includes(formuleId) ? vehFormules[1]?.id ?? vehFormules[0]?.id : formuleId} setFormuleId={setFormuleId} dates={dates} dateIdx={dateIdx} setDateIdx={setDateIdx} slot={slot} setSlot={setSlot} price={price} basePrice={basePrice} promoOn={promoOn} total={total} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("market")} onConfirm={confirmBooking} savedAddresses={store.addresses} onPickSaved={(a) => setClientPos({ lat: a.lat, lng: a.lng, label: a.label })} />
       )}
       {screen === "confirm" && sel && active && <Confirm sel={sel} formuleName={active.service} slotLabel={`${active.date === dates[0]?.iso ? "AUJ" : active.date} ${active.slot}`} total={active.total} promoOn={Boolean(active.promo)} onTrack={() => go("tracking")} onHome={() => go("home")} />}
       {screen === "tracking" && (active ? (
@@ -286,7 +308,7 @@ export function WashMobile({ washers, services }: { washers: Washer[]; services:
         />
       )}
       {screen === "request" && (
-        <RequestWash formules={formules} formuleId={formuleId} setFormuleId={setFormuleId} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("home")} onLaunch={launchRequest} />
+        <RequestWash vehFormules={vehFormules} homeFormules={homeFormules} formuleId={formuleId} setFormuleId={setFormuleId} clientPos={clientPos} onPickLocation={() => setPickerOpen(true)} onBack={() => go("home")} onLaunch={launchRequest} />
       )}
       {screen === "offers" && (
         <Offers list={list} formule={formule} requestId={requestId} proposedPrice={proposedPrice} setProposedPrice={setProposedPrice} posLabel={clientPos?.label ?? "Maârif, Casablanca"} onAccept={acceptOffer} onCancel={() => go("home")} />
@@ -321,7 +343,7 @@ function Splash() {
 }
 
 /* ===================== HOME : HÉROS ===================== */
-function HomeHero({ list, go, onPick, avatarInits, promoOn }: { list: WasherLite[]; go: (s: Screen) => void; onPick: (w: WasherLite) => void; avatarInits: string | null; promoOn: boolean }) {
+function HomeHero({ list, go, onPick, onService, avatarInits, promoOn }: { list: WasherLite[]; go: (s: Screen) => void; onPick: (w: WasherLite) => void; onService: (id: string) => void; avatarInits: string | null; promoOn: boolean }) {
   const available = list.filter((w) => w.available_now).length;
   const liveCount = available || list.length;
   return (
@@ -346,10 +368,10 @@ function HomeHero({ list, go, onPick, avatarInits, promoOn }: { list: WasherLite
       <div style={S.heroBubbles}>
         {/* Services de lavage: véhicules, tapis, salons, matelas.
             Véhicule → marketplace laveurs; les autres → Commande à ton prix. */}
-        <HeroBubble label="Véhicule" delay={0.05} float={0} grad="linear-gradient(150deg,#3A78FF,#0B3D91)" shadow="rgba(11,61,145,.45)" icon="car" onClick={() => go("market")} />
-        <HeroBubble label="Tapis" delay={0.12} float={0.4} grad="linear-gradient(150deg,#16D6C4,#0B7A6D)" shadow="rgba(11,122,109,.45)" icon="rug" onClick={() => go("request")} />
-        <HeroBubble label="Salon" delay={0.19} float={0.8} grad="linear-gradient(150deg,#6D6BF2,#3B2EAE)" shadow="rgba(59,46,174,.45)" icon="sofa" sparkle onClick={() => go("request")} />
-        <HeroBubble label="Matelas" delay={0.26} float={1.2} grad="linear-gradient(150deg,#52C6EC,#1A6B96)" shadow="rgba(26,107,150,.45)" icon="bed" onClick={() => go("request")} />
+        <HeroBubble label="Véhicule" delay={0.05} float={0} grad="linear-gradient(150deg,#3A78FF,#0B3D91)" shadow="rgba(11,61,145,.45)" icon="car" onClick={() => onService("vehicule")} />
+        <HeroBubble label="Tapis" delay={0.12} float={0.4} grad="linear-gradient(150deg,#16D6C4,#0B7A6D)" shadow="rgba(11,122,109,.45)" icon="rug" onClick={() => onService("tapis")} />
+        <HeroBubble label="Salon" delay={0.19} float={0.8} grad="linear-gradient(150deg,#6D6BF2,#3B2EAE)" shadow="rgba(59,46,174,.45)" icon="sofa" sparkle onClick={() => onService("salon")} />
+        <HeroBubble label="Matelas" delay={0.26} float={1.2} grad="linear-gradient(150deg,#52C6EC,#1A6B96)" shadow="rgba(26,107,150,.45)" icon="bed" onClick={() => onService("matelas")} />
       </div>
       <div style={{ padding: "22px 18px 0" }}>
         {/* inDrive-style: order at YOUR price */}
@@ -655,24 +677,24 @@ function Account({ go, store, sessionEmail, sessionName, isLogged, active, onLog
   const [detail, setDetail] = useState<string | null>(null);
   const name = store.profile.name || sessionName || "";
   const displayName = name || "Invité";
-  const inits = name ? initialsOf(name) : "🙂";
+  const inits = name ? initialsOf(name) : null;
   const doneCount = store.history.filter((h) => h.status === "done").length;
   const spent = store.history.filter((h) => h.status === "done").reduce((s, h) => s + h.total, 0);
   const statut = doneCount >= 8 ? "Gold" : doneCount >= 4 ? "Silver" : "Bronze";
   const menu = [
-    { icon: "🧾", label: "Mes lavages", bg: "#E8EEFF" },
-    { icon: "📍", label: "Mes adresses", bg: "#E6FAF6" },
-    { icon: "💳", label: "Paiement", bg: "#FDF1DC" },
-    { icon: "🎁", label: "Parrainage & crédits", bg: "#F1EBFB" },
-    { icon: "🔔", label: "Notifications", bg: "#E8EEFF" },
-    { icon: "⚙️", label: "Paramètres", bg: "#EEF1F7" },
+    { icon: "lavages", label: "Mes lavages", bg: "#E8EEFF" },
+    { icon: "adresses", label: "Mes adresses", bg: "#E6FAF6" },
+    { icon: "carte", label: "Paiement", bg: "#FDF1DC" },
+    { icon: "parrainage", label: "Parrainage & crédits", bg: "#F1EBFB" },
+    { icon: "notification", label: "Notifications", bg: "#E8EEFF" },
+    { icon: "reglages", label: "Paramètres", bg: "#EEF1F7" },
   ];
   return (
     <>
       <div className="scrl" style={S.scr}>
         <div style={{ background: "radial-gradient(500px 320px at 80% 0%,#1B3E8F,#0A1735 70%)", borderRadius: "0 0 28px 28px", padding: "calc(env(safe-area-inset-top,0px) + 30px) 20px 24px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ width: 62, height: 62, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 22, flex: "none" }}>{inits}</div>
+            <div style={{ width: 62, height: 62, borderRadius: "50%", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 22, flex: "none" }}>{inits ?? <Ic name="smiley" size={42} />}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ color: "#fff", fontWeight: 800, fontSize: 19 }}>{displayName}</div>
               <div style={{ color: "rgba(255,255,255,.6)", fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{store.profile.phone || sessionEmail || "Complète ton profil"}</div>
@@ -695,10 +717,10 @@ function Account({ go, store, sessionEmail, sessionName, isLogged, active, onLog
           )}
           <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 18, overflow: "hidden" }}>
             {menu.map((m, i) => (
-              <div key={m.label} onClick={() => setDetail(m.label)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, padding: 15, borderBottom: i < menu.length - 1 ? "1px solid #EEF1F7" : "none" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>{m.icon}</div><span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{m.label}</span><span style={{ color: "#C2CADB", fontSize: 18 }}>›</span></div>
+              <div key={m.label} onClick={() => setDetail(m.label)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, padding: 15, borderBottom: i < menu.length - 1 ? "1px solid #EEF1F7" : "none" }}><div style={{ width: 36, height: 36, borderRadius: 11, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><Ic name={m.icon} size={27} /></div><span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "#0A1735" }}>{m.label}</span><span style={{ color: "#C2CADB", fontSize: 18 }}>›</span></div>
             ))}
           </div>
-          <div onClick={() => go("pro")} className="tap" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 13, background: "#0A1735", borderRadius: 18, padding: 16 }}><div style={{ width: 42, height: 42, borderRadius: 12, background: "rgba(127,212,245,.16)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 20 }}>💼</div><div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Devenir laveur partenaire</div><div style={{ color: "rgba(255,255,255,.6)", fontSize: 12 }}>Gagne jusqu&apos;à 6 000 MAD/mois</div></div><span style={{ color: "#7FD4F5", fontSize: 20 }}>›</span></div>
+          <div onClick={() => go("pro")} className="tap" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 13, background: "#0A1735", borderRadius: 18, padding: 16 }}><div style={{ width: 42, height: 42, borderRadius: 12, background: "rgba(127,212,245,.16)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}><Ic name="sacpro" size={30} /></div><div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5 }}>Devenir laveur partenaire</div><div style={{ color: "rgba(255,255,255,.6)", fontSize: 12 }}>Gagne jusqu&apos;à 6 000 MAD/mois</div></div><span style={{ color: "#7FD4F5", fontSize: 20 }}>›</span></div>
           {isLogged ? (
             <button onClick={() => { onLogout(); }} className="tap" style={{ width: "100%", marginTop: 14, background: "#fff", border: "1px solid #F3D2D2", color: "#D14343", fontFamily: "inherit", fontWeight: 700, fontSize: 14, padding: 14, borderRadius: 15 }}>Se déconnecter</button>
           ) : (
@@ -731,7 +753,7 @@ function SubScreen({ title, sub, icon, iconBg, onBack, children }: { title: stri
     <div className="scrl" style={{ position: "fixed", inset: 0, zIndex: 40, overflowY: "auto", background: "#F6F7FB", animation: "m_modalIn .38s var(--spring-soft, cubic-bezier(.26,1.14,.4,1)) both", paddingBottom: 40 }}>
       <div style={{ ...S.marketHead, display: "flex", alignItems: "center", gap: 12 }}>
         <BackBtn onClick={onBack} />
-        {icon && <div style={{ width: 42, height: 42, borderRadius: 13, background: iconBg ?? "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flex: "none", animation: "m_popIn .5s .08s cubic-bezier(.22,1,.36,1) both" }}>{icon}</div>}
+        {icon && <div style={{ width: 42, height: 42, borderRadius: 13, background: iconBg ?? "#E8EEFF", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", animation: "m_popIn .5s .08s cubic-bezier(.22,1,.36,1) both" }}>{icon.length <= 3 ? <span style={{ fontSize: 20 }}>{icon}</span> : <Ic name={icon} size={31} />}</div>}
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>{title}</div>
           {sub && <div style={{ fontSize: 11.5, color: "#5B6784", marginTop: 1 }}>{sub}</div>}
@@ -746,7 +768,7 @@ function SubScreen({ title, sub, icon, iconBg, onBack, children }: { title: stri
 function EmptyState({ emoji, title, sub }: { emoji: string; title: string; sub: string }) {
   return (
     <div style={{ textAlign: "center", padding: "44px 20px 26px", animation: "m_fadeUp .5s .05s both" }}>
-      <div style={{ width: 84, height: 84, borderRadius: 26, margin: "0 auto", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", boxShadow: "0 18px 36px -10px rgba(6,182,166,.5)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38, animation: "m_popIn .6s .1s cubic-bezier(.22,1.3,.36,1) both" }}>{emoji}</div>
+      <div style={{ width: 84, height: 84, borderRadius: 26, margin: "0 auto", background: "linear-gradient(135deg,#1A4ED8,#06B6A6)", boxShadow: "0 18px 36px -10px rgba(6,182,166,.5)", display: "flex", alignItems: "center", justifyContent: "center", animation: "m_popIn .6s .1s cubic-bezier(.22,1.3,.36,1) both" }}>{emoji.length <= 3 ? <span style={{ fontSize: 38 }}>{emoji}</span> : <Ic name={emoji} size={58} />}</div>
       <div style={{ fontWeight: 800, fontSize: 17, color: "#0A1735", marginTop: 16 }}>{title}</div>
       <div style={{ fontSize: 13, color: "#5B6784", marginTop: 6, lineHeight: 1.5 }}>{sub}</div>
     </div>
@@ -762,9 +784,9 @@ function WashHistory({ history, onBack }: { history: BookingRec[]; onBack: () =>
     cancelled: ["Annulé", "#D14343", "#FDECEC"],
   };
   return (
-    <SubScreen title="Mes lavages" sub="Ton historique complet" icon="🧾" iconBg="#E8EEFF" onBack={onBack}>
+    <SubScreen title="Mes lavages" sub="Ton historique complet" icon="lavages" iconBg="#E8EEFF" onBack={onBack}>
       {history.length === 0 ? (
-        <EmptyState emoji="🧾" title="Pas encore de lavage" sub="Ta première réservation apparaîtra ici, avec son statut en direct." />
+        <EmptyState emoji="lavages" title="Pas encore de lavage" sub="Ta première réservation apparaîtra ici, avec son statut en direct." />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
           {history.map((h, i) => {
@@ -798,9 +820,9 @@ function Addresses({ onBack }: { onBack: () => void }) {
   const [namePick, setNamePick] = useState("Domicile");
   const remove = (a: Address) => setStore({ addresses: store.addresses.filter((x) => !(x.name === a.name && x.label === a.label)) });
   return (
-    <SubScreen title="Mes adresses" sub="Tes lieux enregistrés" icon="📍" iconBg="#E6FAF6" onBack={onBack}>
+    <SubScreen title="Mes adresses" sub="Tes lieux enregistrés" icon="adresses" iconBg="#E6FAF6" onBack={onBack}>
       {store.addresses.length === 0 && (
-        <EmptyState emoji="📍" title="Aucune adresse enregistrée" sub="Ajoute ton domicile ou ton bureau pour réserver en 2 secondes." />
+        <EmptyState emoji="adresses" title="Aucune adresse enregistrée" sub="Ajoute ton domicile ou ton bureau pour réserver en 2 secondes." />
       )}
       {store.addresses.length > 0 && (
         <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", marginBottom: 14, boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
@@ -835,7 +857,7 @@ function Addresses({ onBack }: { onBack: () => void }) {
 
 function Payment({ onBack }: { onBack: () => void }) {
   return (
-    <SubScreen title="Paiement" sub="Comment tu paies ton lavage" icon="💳" iconBg="#FDF1DC" onBack={onBack}>
+    <SubScreen title="Paiement" sub="Comment tu paies ton lavage" icon="carte" iconBg="#FDF1DC" onBack={onBack}>
       <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "15px" }}>
           <div style={{ width: 38, height: 38, borderRadius: 11, background: "#E6FAF6", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 17 }}>💵</div>
@@ -864,7 +886,7 @@ function Referral({ name, onBack }: { name: string; onBack: () => void }) {
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* clipboard blocked */ }
   };
   return (
-    <SubScreen title="Parrainage & crédits" sub="Partage et gagne" icon="🎁" iconBg="#F1EBFB" onBack={onBack}>
+    <SubScreen title="Parrainage & crédits" sub="Partage et gagne" icon="parrainage" iconBg="#F1EBFB" onBack={onBack}>
       <div style={{ position: "relative", overflow: "hidden", background: "linear-gradient(120deg,#0B3D91,#06B6A6)", borderRadius: 20, padding: 22, color: "#fff", textAlign: "center", boxShadow: "0 14px 30px rgba(11,61,145,.3)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         <div style={{ position: "absolute", right: -24, top: -24, width: 120, height: 120, borderRadius: "50%", background: "rgba(127,212,245,.2)" }} />
         <div style={{ position: "absolute", left: -30, bottom: -34, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,.08)" }} />
@@ -895,7 +917,7 @@ function Notifs({ onBack }: { onBack: () => void }) {
   ];
   const icons: Record<string, [string, string]> = { track: ["🚚", "#E8EEFF"], promo: ["🏷️", "#FDF1DC"], reminders: ["⏰", "#E6FAF6"] };
   return (
-    <SubScreen title="Notifications" sub="Ce que tu reçois" icon="🔔" iconBg="#E8EEFF" onBack={onBack}>
+    <SubScreen title="Notifications" sub="Ce que tu reçois" icon="notification" iconBg="#E8EEFF" onBack={onBack}>
       <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         {rows.map((r, i) => {
           const on = store.notif[r.key];
@@ -922,7 +944,7 @@ function Settings({ onBack }: { onBack: () => void }) {
     <div style={{ width: 36, height: 36, borderRadius: 11, background: bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 16 }}>{em}</div>
   );
   return (
-    <SubScreen title="Paramètres" sub="App, aide & confidentialité" icon="⚙️" iconBg="#EEF1F7" onBack={onBack}>
+    <SubScreen title="Paramètres" sub="App, aide & confidentialité" icon="reglages" iconBg="#EEF1F7" onBack={onBack}>
       <div style={{ background: "#fff", border: "1px solid #E7EAF2", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 14px rgba(10,23,53,.05)", animation: "m_fadeUp .5s .05s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", borderBottom: "1px solid #EEF1F7", animation: "m_fadeUp .45s .08s var(--ease-out, cubic-bezier(.22,1,.36,1)) both" }}>
           {rowIcon("🌐", "#E8EEFF")}
@@ -997,14 +1019,25 @@ function Field({ label, value, onChange, placeholder, type }: { label: string; v
 }
 
 /* ===================== COMMANDE À TON PRIX (inDrive-style) ===================== */
-function RequestWash({ formules, formuleId, setFormuleId, clientPos, onPickLocation, onBack, onLaunch }: {
-  formules: Formule[]; formuleId: string; setFormuleId: (s: string) => void;
+function RequestWash({ vehFormules, homeFormules, formuleId, setFormuleId, clientPos, onPickLocation, onBack, onLaunch }: {
+  vehFormules: Formule[]; homeFormules: Formule[]; formuleId: string; setFormuleId: (s: string) => void;
   clientPos: PickedPos | null; onPickLocation: () => void; onBack: () => void; onLaunch: (price: number) => void;
 }) {
+  const formules = [...vehFormules, ...homeFormules];
   const formule = formules.find((f) => f.id === formuleId) ?? formules[0];
   const [price, setPrice] = useState(formule?.price ?? 100);
   useEffect(() => { setPrice(formule?.price ?? 100); }, [formuleId, formule?.price]);
   const bump = (d: number) => setPrice((p) => Math.max(30, p + d));
+  const FormuleRow = ({ f }: { f: Formule }) => {
+    const on = f.id === formuleId;
+    return (
+      <div onClick={() => setFormuleId(f.id)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, background: "#fff", border: `2px solid ${on ? "#1A4ED8" : "#E7EAF2"}`, borderRadius: 16, padding: "13px 15px" }}>
+        <div style={{ width: 40, height: 40, borderRadius: 12, background: f.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 19 }}>{f.icon}</div>
+        <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14.5, color: "#0A1735" }}>{f.name}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{f.desc}</div></div>
+        <div className="mono" style={{ fontSize: 12.5, color: "#8A94AE" }}>réf. {f.price} MAD</div>
+      </div>
+    );
+  };
   return (
     <>
       <div className="scrl" style={{ ...S.scr, paddingBottom: 130 }}>
@@ -1013,18 +1046,13 @@ function RequestWash({ formules, formuleId, setFormuleId, clientPos, onPickLocat
           <div><div style={{ fontWeight: 800, fontSize: 18, color: "#0A1735", letterSpacing: "-.02em" }}>Commande à ton prix</div><div style={{ fontSize: 12, color: "#5B6784" }}>Toi tu proposes, les laveurs répondent</div></div>
         </div>
         <div style={{ padding: "16px 18px 0" }}>
-          <div style={S.bookH}>Ton service</div>
+          <div style={S.bookH}>🚗 Véhicule</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {formules.map((f) => {
-              const on = f.id === formuleId;
-              return (
-                <div key={f.id} onClick={() => setFormuleId(f.id)} className="tap" style={{ display: "flex", alignItems: "center", gap: 13, background: "#fff", border: `2px solid ${on ? "#1A4ED8" : "#E7EAF2"}`, borderRadius: 16, padding: "13px 15px" }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 12, background: f.bg, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 19 }}>{f.icon}</div>
-                  <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14.5, color: "#0A1735" }}>{f.name}</div><div style={{ fontSize: 12, color: "#5B6784" }}>{f.desc}</div></div>
-                  <div className="mono" style={{ fontSize: 12.5, color: "#8A94AE" }}>réf. {f.price} MAD</div>
-                </div>
-              );
-            })}
+            {vehFormules.map((f) => <FormuleRow key={f.id} f={f} />)}
+          </div>
+          <div style={S.bookH}>🏠 Maison — nettoyage vapeur</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {homeFormules.map((f) => <FormuleRow key={f.id} f={f} />)}
           </div>
 
           <div style={S.bookH}>Où ?</div>
